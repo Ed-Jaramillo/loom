@@ -1327,15 +1327,29 @@ func (a *Agent) skillMenuPromptSupplement() string {
 	var b strings.Builder
 	b.WriteString("\n\n---\n\n# Available skills\n\n")
 	b.WriteString("Bound to this agent. Load with manage_skills to bring instructions into the conversation; until then, only the name + description below are in context.\n\n")
+	listed := 0
 	for _, rb := range resolved {
 		if rb.Skill == nil {
 			continue
 		}
+		// MANUAL skills are the user's to invoke, so they are not on the menu:
+		// manage_skills(load) refuses them, and naming one here would only
+		// invite the call that gets refused. The user's slash command activates
+		// them directly (Agent.loadSkillFromSlashCommand).
+		if isManualSkill(rb.Skill) {
+			continue
+		}
+		listed++
 		if rb.Skill.Description != "" {
 			b.WriteString(fmt.Sprintf("- %s — %s\n", rb.Skill.Name, rb.Skill.Description))
 		} else {
 			b.WriteString(fmt.Sprintf("- %s\n", rb.Skill.Name))
 		}
+	}
+	// An all-MANUAL binding set leaves a heading over an empty list, which reads
+	// as a menu with nothing on it. Render nothing instead.
+	if listed == 0 {
+		return ""
 	}
 	return b.String()
 }
@@ -1410,6 +1424,18 @@ func (a *Agent) checkAndRegisterManageSkillsTool() {
 		return
 	}
 
+	a.tools.Register(a.newManageSkillsTool())
+}
+
+// newManageSkillsTool builds the manage_skills tool with this agent's skill
+// wiring. Two callers share it: the registration above, and the slash-command
+// load (Agent.loadSkillFromSlashCommand), which drives the same load path the
+// model uses so both routes activate, wire tools and emit tasks identically.
+// Returns nil when the orchestrator or its library is missing.
+func (a *Agent) newManageSkillsTool() *ManageSkillsTool {
+	if a.skillOrchestrator == nil || a.skillOrchestrator.GetLibrary() == nil {
+		return nil
+	}
 	tool := NewManageSkillsTool(
 		a.skillOrchestrator,
 		a.skillOrchestrator.GetLibrary(),
@@ -1422,7 +1448,7 @@ func (a *Agent) checkAndRegisterManageSkillsTool() {
 	// auto-wires a.skillTaskEmitter, and emitSkillTasksAsync reads that field
 	// at call time. An agent with no emitter is a no-op at the same place.
 	tool.emitSkillTasks = a.emitSkillTasksAsync
-	a.tools.Register(tool)
+	return tool
 }
 
 // checkAndRegisterLoadPatternTool registers the load_pattern builtin whenever a
@@ -1975,6 +2001,13 @@ func (a *Agent) chat(ctx context.Context, sessionID string, userMessage string, 
 		Timestamp:     time.Now(),
 	}, true)
 
+	// A leading slash command is the user activating a skill. It runs here,
+	// after their message is on the record and before the model reads the
+	// conversation, so the skill's instructions are already in context for the
+	// turn that asked for them — and, for a MANUAL skill, this is the only
+	// route in. A message that names no known command is left alone.
+	a.loadSkillFromSlashCommand(ctx, session, userMessage)
+
 	// Fire graph memory extraction on the incoming user message immediately,
 	// in parallel with the LLM processing it. The user message is where the
 	// information lives — extract entities/facts before the response comes back.
@@ -2205,12 +2238,31 @@ func (a *Agent) recordConversationMetrics(sessionID string, response *Response, 
 
 // addUsage folds one LLM call's usage into a running turn total.
 func addUsage(dst *Usage, u Usage) {
+	// RateLimitTokens stays zero until some call sets it (so a turn of calls
+	// that never set it still equals their plain sum); once any call does, it
+	// carries every call's metered figure, falling back to TotalTokens for the
+	// calls that did not. Computed before dst's TotalTokens is advanced.
+	if dst.RateLimitTokens > 0 || u.RateLimitTokens > 0 {
+		dst.RateLimitTokens = dst.ThroughputTokens() + u.ThroughputTokens()
+	}
 	dst.InputTokens += u.InputTokens
 	dst.OutputTokens += u.OutputTokens
 	dst.TotalTokens += u.TotalTokens
 	dst.CacheReadInputTokens += u.CacheReadInputTokens
 	dst.CacheCreationInputTokens += u.CacheCreationInputTokens
 	dst.CostUSD += u.CostUSD
+}
+
+// observePromptUsage feeds a successful call's provider-reported prompt size
+// into the session's relief calibration. The whole prompt is input + cache
+// read + cache write (types.Usage). Call before appending the response, so the
+// compiled context still matches what was sent.
+func (a *Agent) observePromptUsage(session *Session, u Usage) {
+	segMem, ok := session.SegmentedMem.(*SegmentedMemory)
+	if !ok || segMem == nil {
+		return
+	}
+	segMem.ObservePromptTokens(u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens)
 }
 
 // appendMessage is the arrival seam (HLD §1): it stamps the message's turn,
@@ -2578,6 +2630,37 @@ func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
 				tools = recovery.activeTools(tools)
 				segMem.SetAdvertisedToolsBytes(advertisedToolsBytes(tools))
 			}
+			// Relief has nothing left to shed and the turn's own stubs still
+			// hold the context over the start mark: every further send is a
+			// near-limit loop toward MaxTurns and a preview-backed synthesis.
+			// End the turn with an error the user can act on instead.
+			if o, over := segMem.CurrentTurnOverflow(); over {
+				cause := fmt.Errorf("turn produced too many tool results to fit the context window: "+
+					"%d of %d results are already offloaded to stubs and the turn alone is still %d tokens "+
+					"against a relief start mark of %d; split the work into smaller batches across turns",
+					o.StubbedResults, o.ToolResults, o.FloorTokens, o.StartTokens)
+				zap.L().Error("current turn overflow: turn ends",
+					zap.String("session_id", session.ID),
+					zap.Int("turn", turnCount),
+					zap.Int("floor_tokens", o.FloorTokens),
+					zap.Int("start_tokens", o.StartTokens),
+					zap.Int("stubbed_results", o.StubbedResults),
+					zap.Int("tool_results", o.ToolResults))
+				span.AddEvent("turn.current_turn_overflow", map[string]interface{}{
+					"turn":            turnCount,
+					"floor_tokens":    o.FloorTokens,
+					"start_tokens":    o.StartTokens,
+					"stubbed_results": o.StubbedResults,
+					"tool_results":    o.ToolResults,
+				})
+				return nil, recovery.buildRecoverableError("current_turn_overflow", cause, "",
+					map[string]any{
+						"floor_tokens":    o.FloorTokens,
+						"start_tokens":    o.StartTokens,
+						"stubbed_results": o.StubbedResults,
+						"tool_results":    o.ToolResults,
+					})
+			}
 		}
 
 		// withReminder appends the turn's soft reminder as a trailing system
@@ -2597,7 +2680,22 @@ func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
 		// context-too-long still comes back (loom's estimate under-counted), shed
 		// and resend once; a second refusal ends the turn with the recoverable
 		// context_exhausted error.
-		llmResp, err := a.chatWithRetry(ctx, withReminder(messages), tools)
+		//
+		// Generation-free replay (WeaveRequest.replay_assistant_message): when a
+		// scripted assistant turn is threaded through the context, substitute it
+		// for the provider call. Relief/compression (above), context compilation,
+		// and graph extraction on the incoming user turn have all already run, so
+		// the memory pipeline is exercised exactly as a live turn — only
+		// generation is skipped. The scripted text carries no tool calls, so the
+		// loop finalizes this turn at the no-tool-calls branch below. An empty
+		// override is ignored (falls through to a normal provider call).
+		var llmResp *LLMResponse
+		var err error
+		if scripted, ok := scriptedResponseFromContext(ctx); ok && strings.TrimSpace(scripted) != "" {
+			llmResp = &LLMResponse{Content: scripted, StopReason: "end_turn"}
+		} else {
+			llmResp, err = a.chatWithRetry(ctx, withReminder(messages), tools)
+		}
 		if err != nil && errors.Is(err, llm.ErrContextTooLong) {
 			if segMem, ok := session.SegmentedMem.(*SegmentedMemory); ok && segMem != nil {
 				_, estimate, target := segMem.ReleasePressure(ctx, pressureRecoveryPenalty)
@@ -2634,6 +2732,7 @@ func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
 			return nil, fmt.Errorf("LLM call failed: %w", err)
 		}
 		addUsage(&turnUsage, llmResp.Usage)
+		a.observePromptUsage(session, llmResp.Usage)
 
 		// Record LLM response on conversation_loop span
 		llmEvent := map[string]interface{}{
@@ -2796,7 +2895,7 @@ func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
 				// One-shot retry: nudge the LLM to produce a response.
 				emptyRetried = true
 				a.appendMessage(ctx, session, Message{
-					Role:      "user",
+					Role:      "empty_response_retry",
 					Content:   "Your previous response was empty. Please provide a response summarizing what you found or explaining what went wrong.",
 					AgentID:   a.GetID(),
 					Timestamp: time.Now(),
@@ -3258,7 +3357,7 @@ func (a *Agent) commitToolRow(ctx Context, session *Session, toolCall ToolCall, 
 	if result != nil && result.Metadata != nil {
 		if textBody, ok := result.Metadata["text_body"].(string); ok && textBody != "" {
 			st.pendingSidecars = append(st.pendingSidecars, Message{
-				Role:      "user",
+				Role:      "skill_body",
 				Content:   textBody,
 				AgentID:   a.GetID(),
 				Timestamp: time.Now(),
@@ -3291,14 +3390,39 @@ func (a *Agent) synthesizeFinalResponse(ctx Context, session *Session, turnCount
 	// Include explicit format instructions since they may have been compressed in context
 	synthesisPrompt := "You must provide your final answer NOW with whatever information you have gathered so far. Summarize your findings: what actions were taken, what results were produced, and any remaining steps the user would need to complete manually. Be concise and actionable. You MUST respond with text — do not return an empty response."
 	a.appendMessage(ctx, session, Message{
-		Role:      "user",
+		Role:      "synthesis_prompt",
 		Content:   synthesisPrompt,
 		AgentID:   a.GetID(), // Track which agent created this synthesis request
 		Timestamp: time.Now(),
 	}, false)
 
-	// Make final LLM call WITHOUT tools to force synthesis
+	// Make final LLM call WITHOUT tools to force synthesis. It reaches here
+	// exactly when the loop ran out of budget — the turn is at its largest —
+	// so it gets the same relief as a loop send: advertise no tool bytes (this
+	// call carries none), shed before the send, and on a provider refusal shed
+	// deeper and resend once.
+	segMem, _ := session.SegmentedMem.(*SegmentedMemory)
+	if segMem != nil {
+		segMem.SetAdvertisedToolsBytes(0)
+		if shed, estimate, target := segMem.ReleasePressure(ctx, 0); shed {
+			zap.L().Info("relief: shed before synthesis",
+				zap.String("session_id", session.ID),
+				zap.Int("estimate_tokens", estimate),
+				zap.Int("target_tokens", target))
+		}
+	}
 	finalResp, err := a.chatWithRetry(ctx, session.GetMessages(), nil)
+	if err != nil && errors.Is(err, llm.ErrContextTooLong) && segMem != nil {
+		_, estimate, target := segMem.ReleasePressure(ctx, pressureRecoveryPenalty)
+		zap.L().Info("context too long at synthesis: relief pass complete, resending once",
+			zap.String("session_id", session.ID),
+			zap.Int("estimate_tokens", estimate),
+			zap.Int("target_tokens", target))
+		finalResp, err = a.chatWithRetry(ctx, session.GetMessages(), nil)
+	}
+	if err == nil {
+		a.observePromptUsage(session, finalResp.Usage)
+	}
 	if err != nil {
 		// Only fall back to guidance message if synthesis fails
 		maxTurnsMessage := a.getGuidanceMessage(ctx, "max_turns_reached", nil)

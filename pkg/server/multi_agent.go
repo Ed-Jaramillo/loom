@@ -64,6 +64,12 @@ type MultiAgentServer struct {
 	// (server.allow_time_override). Set via SetAllowTimeOverride.
 	allowTimeOverride bool
 
+	// allowAssistantOverride accepts WeaveRequest.replay_assistant_message
+	// (generation-free conversation replay — the caller supplies the
+	// assistant's turn verbatim). Default false (server.allow_assistant_override).
+	// Set via SetAllowAssistantOverride.
+	allowAssistantOverride bool
+
 	defaultAgentID     string                           // Agent to use when no agent_id specified
 	patternBroadcaster *PatternEventBroadcaster         // Broadcasts pattern update events
 	hotReloaders       map[string]*patterns.HotReloader // Hot-reloaders for each agent's patterns
@@ -315,6 +321,16 @@ func (s *MultiAgentServer) SetAllowTimeOverride(allow bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.allowTimeOverride = allow
+}
+
+// SetAllowAssistantOverride configures whether
+// WeaveRequest.replay_assistant_message is honored
+// (server.allow_assistant_override). See applyReplayAssistant for the gate
+// semantics. This should be called after NewMultiAgentServer(), before serving.
+func (s *MultiAgentServer) SetAllowAssistantOverride(allow bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowAssistantOverride = allow
 }
 
 // SetLogger injects the logger for server operations.
@@ -1002,6 +1018,12 @@ func (s *MultiAgentServer) Weave(ctx context.Context, req *loomv1.WeaveRequest) 
 	if err != nil {
 		return nil, err
 	}
+	// Generation-free replay: a scripted assistant turn substitutes for the LLM
+	// call while the memory pipeline still runs (see applyReplayAssistant).
+	ctx, err = applyReplayAssistant(ctx, req, s.allowAssistantOverride)
+	if err != nil {
+		return nil, err
+	}
 
 	// Get agent: if no agent_id specified but session_id is, look up which agent owns the session.
 	// This fixes the bug where Weave(session_id=X) without agent_id falls through to the
@@ -1229,6 +1251,14 @@ func (s *MultiAgentServer) StreamWeave(req *loomv1.WeaveRequest, stream loomv1.L
 	// Replay/import support: validate occurred_at and thread it through the
 	// context used for the agent call (see applyOccurredAt).
 	ctx, err := applyOccurredAt(stream.Context(), req, s.allowTimeOverride)
+	if err != nil {
+		return err
+	}
+	// Generation-free replay: a scripted assistant turn substitutes for the LLM
+	// call while the memory pipeline still runs (see applyReplayAssistant).
+	// Mirrors Weave — without this, a streaming replay would silently persist a
+	// generated turn where the scripted one belongs.
+	ctx, err = applyReplayAssistant(ctx, req, s.allowAssistantOverride)
 	if err != nil {
 		return err
 	}
@@ -4865,6 +4895,23 @@ func (s *MultiAgentServer) GetScheduleHistory(ctx context.Context, req *loomv1.G
 	}, nil
 }
 
+// isNewMessageUpdateRole reports whether a persisted message role should
+// produce a SessionUpdate_NewMessage on the live WeaveProgress stream.
+// skill_body and hygiene_injection are synthetic (agent-authored) content,
+// not the literal end user, but a streaming consumer still needs to see
+// them arrive in real time with their own role — the same way
+// GetConversationHistory already returns them (server.go:547-567).
+// Delegates the synthetic-role check to agent.IsSyntheticWireUserRole
+// rather than re-declaring that two-string set here.
+func isNewMessageUpdateRole(role string) bool {
+	switch role {
+	case "assistant", "user", "tool":
+		return true
+	default:
+		return agent.IsSyntheticWireUserRole(role)
+	}
+}
+
 // SubscribeToSession subscribes to real-time updates for a session.
 // Streams updates when new messages arrive in the session conversation.
 // This allows clients to receive asynchronous responses from workflow coordinators
@@ -4960,7 +5007,7 @@ func (s *MultiAgentServer) SubscribeToSession(req *loomv1.SubscribeToSessionRequ
 				}
 
 				// Populate based on message role
-				if msg.Role == "assistant" || msg.Role == "user" || msg.Role == "tool" {
+				if isNewMessageUpdateRole(msg.Role) {
 					update.UpdateType = &loomv1.SessionUpdate_NewMessage{
 						NewMessage: &loomv1.NewMessageUpdate{
 							Role:             msg.Role,
