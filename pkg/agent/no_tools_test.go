@@ -8,10 +8,13 @@
 package agent
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	loomv1 "github.com/teradata-labs/loom/gen/go/loom/v1"
 	"github.com/teradata-labs/loom/pkg/shuttle"
 )
 
@@ -42,4 +45,32 @@ func TestWithoutToolsKeepsGraphMemoryButHidesAllTools(t *testing.T) {
 	assert.Contains(t, ordinary.ListTools(), "graph_memory")
 	ordinary.RegisterTool(mockTool("dynamic"))
 	assert.Contains(t, ordinary.ListTools(), "dynamic")
+}
+
+func TestRegistry_PerAgentNoToolsKeepsGraphMemory(t *testing.T) {
+	registry, tmpDir := createTestRegistry(t)
+	store := newTestGraphStore(t)
+	registry.SetGraphMemoryStore(store, nil)
+
+	agentsDir := filepath.Join(tmpDir, "agents")
+	noTools := createTestAgentConfig("no-tools")
+	noTools.Tools = &loomv1.ToolsConfig{None: true}
+	noTools.Memory.GraphMemory = &loomv1.GraphMemoryConfig{Enabled: true, EnableExtraction: true}
+	require.NoError(t, SaveAgentConfig(noTools, filepath.Join(agentsDir, "no-tools.yaml")))
+	ordinary := createTestAgentConfig("ordinary")
+	require.NoError(t, SaveAgentConfig(ordinary, filepath.Join(agentsDir, "ordinary.yaml")))
+
+	ctx := context.Background()
+	require.NoError(t, registry.LoadAgents(ctx))
+	limited, err := registry.CreateAgent(ctx, "no-tools")
+	require.NoError(t, err)
+	assert.Zero(t, limited.ToolCount())
+	assert.Same(t, store, limited.graphMemoryStore)
+	assert.True(t, limited.graphMemoryConfig.Enabled)
+	assert.True(t, limited.enableGraphMemoryExtraction)
+
+	normal, err := registry.CreateAgent(ctx, "ordinary")
+	require.NoError(t, err)
+	assert.Positive(t, normal.ToolCount())
+	assert.Contains(t, normal.ListTools(), "graph_memory")
 }
