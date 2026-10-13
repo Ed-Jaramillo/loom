@@ -649,11 +649,21 @@ func WithoutBuiltinTool(name string) Option {
 	}
 }
 
+// WithoutTools hides every tool from the agent without disabling background subsystems.
+func WithoutTools() Option {
+	return func(a *Agent) {
+		a.disableToolSurface = true
+	}
+}
+
 // isBuiltinToolSuppressed reports whether the named tool has been suppressed
 // via WithoutBuiltinTool. Read-only; safe under the agent's normal mutex
 // discipline because the suppression map is set at construction and not
 // mutated afterwards.
 func (a *Agent) isBuiltinToolSuppressed(name string) bool {
+	if a.disableToolSurface {
+		return true
+	}
 	if len(a.suppressedBuiltinTools) == 0 {
 		return false
 	}
@@ -860,7 +870,7 @@ func (a *Agent) advertisedTools(session *Session) []shuttle.Tool {
 // activation; the field is parsed but not enforced. A future change can
 // add an MCPManager hook here.
 func (a *Agent) enforceRequiredSkillTools(sessionID string) {
-	if a.skillOrchestrator == nil {
+	if a.disableToolSurface || a.skillOrchestrator == nil {
 		return
 	}
 	active := a.skillOrchestrator.GetActiveSkills(sessionID)
@@ -1005,7 +1015,7 @@ func (a *Agent) applyPermissionToolFilter(in []shuttle.Tool) []shuttle.Tool {
 // the LLM never sees the tool. Subsystems that drive the tool keep
 // running — only the surface is hidden.
 func (a *Agent) RegisterTool(tool shuttle.Tool) {
-	if tool != nil && a.isBuiltinToolSuppressed(tool.Name()) {
+	if a.disableToolSurface || (tool != nil && a.isBuiltinToolSuppressed(tool.Name())) {
 		return
 	}
 	a.tools.Register(tool)
@@ -1026,7 +1036,7 @@ func (a *Agent) UnregisterTool(name string) {
 // RegisterLazyTools registers tools that will only be added to the active tool set
 // when trigger(userMessage) returns true. Safe to call concurrently.
 func (a *Agent) RegisterLazyTools(tools []shuttle.Tool, trigger func(string) bool) {
-	if len(tools) == 0 || trigger == nil {
+	if a.disableToolSurface || len(tools) == 0 || trigger == nil {
 		return
 	}
 	a.mu.Lock()
@@ -1059,7 +1069,7 @@ func (a *Agent) evaluateLazyTools(msg string) {
 		if set.trigger(msg) {
 			for _, t := range set.tools {
 				if !a.tools.IsRegistered(t.Name()) {
-					a.tools.Register(t)
+					a.RegisterTool(t)
 				}
 			}
 		}
@@ -1464,7 +1474,7 @@ func (a *Agent) checkAndRegisterTaskBoardTool() {
 	}
 
 	tbTool := NewTaskBoardTool(a.taskManager, a.taskDecomposer, a.GetID(), a.llm, a.taskBoardConfig)
-	a.tools.Register(tbTool)
+	a.RegisterTool(tbTool)
 }
 
 // checkAndRegisterManageSkillsTool registers the manage_skills builtin whenever
@@ -1484,7 +1494,7 @@ func (a *Agent) checkAndRegisterManageSkillsTool() {
 		return
 	}
 
-	a.tools.Register(a.newManageSkillsTool())
+	a.RegisterTool(a.newManageSkillsTool())
 }
 
 // newManageSkillsTool builds the manage_skills tool with this agent's skill
@@ -1526,7 +1536,7 @@ func (a *Agent) checkAndRegisterLoadPatternTool() {
 		return
 	}
 
-	a.tools.Register(NewLoadPatternTool(a.orchestrator))
+	a.RegisterTool(NewLoadPatternTool(a.orchestrator))
 }
 
 // buildTaskContext queries the task store and builds a compact context block
@@ -3799,7 +3809,7 @@ func (a *Agent) checkAndRegisterGraphMemoryTool() {
 	}
 
 	tool := shuttle.Tool(NewGraphMemoryTool(a.graphMemoryStore, a.config.Name))
-	a.tools.Register(tool)
+	a.RegisterTool(tool)
 }
 
 // graphMemoryTokenBudget returns the token budget for graph memory context injection.
