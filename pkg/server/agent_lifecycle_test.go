@@ -7,12 +7,17 @@ package server
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	loomv1 "github.com/teradata-labs/loom/gen/go/loom/v1"
 	"github.com/teradata-labs/loom/pkg/agent"
+	llmtypes "github.com/teradata-labs/loom/pkg/llm/types"
+	"github.com/teradata-labs/loom/pkg/shuttle"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -117,6 +122,87 @@ func TestAgentLifecycle_CreateAgentFromConfig(t *testing.T) {
 			assert.Contains(t, agentIDs, resp.Id, "new agent should be in server's agents map")
 		})
 	}
+}
+
+// systemPromptRecordingLLM records the system messages of every Chat call so a
+// test can assert on what the provider receives rather than on echoed config.
+type systemPromptRecordingLLM struct {
+	mu     sync.Mutex
+	system []string
+}
+
+func (m *systemPromptRecordingLLM) Chat(ctx context.Context, messages []llmtypes.Message, tools []shuttle.Tool) (*llmtypes.LLMResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, msg := range messages {
+		if msg.Role == "system" {
+			m.system = append(m.system, msg.Content)
+		}
+	}
+	return &llmtypes.LLMResponse{Content: "ok", StopReason: "end_turn"}, nil
+}
+
+func (m *systemPromptRecordingLLM) Name() string  { return "system-prompt-recorder" }
+func (m *systemPromptRecordingLLM) Model() string { return "recorder-model" }
+
+func (m *systemPromptRecordingLLM) systemMessages() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.system...)
+}
+
+// TestAgentLifecycle_CreateAgentFromConfig_RuntimeSystemPrompt creates an agent
+// through the registry, as POST /v1/agents does, and checks the system prompt
+// the LLM receives. GetAgent echoes the submitted config, so it cannot show
+// whether the running agent kept its system_prompt and description.
+func TestAgentLifecycle_CreateAgentFromConfig_RuntimeSystemPrompt(t *testing.T) {
+	const (
+		systemPrompt = "Score each Mastermind guess against the secret code and report black and white pegs."
+		description  = "Mastermind pilot agent"
+	)
+
+	tmpDir := t.TempDir()
+	llm := &systemPromptRecordingLLM{}
+	registry, err := agent.NewRegistry(agent.RegistryConfig{
+		ConfigDir:   tmpDir,
+		DBPath:      filepath.Join(tmpDir, "registry.db"),
+		LLMProvider: llm,
+		Logger:      zaptest.NewLogger(t),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = registry.Close() })
+
+	srv := newTestMultiAgentServer(t)
+	srv.SetAgentRegistry(registry)
+	ctx := context.Background()
+
+	// Inline config with only top-level fields; ensureConfigDefaults fills in
+	// the behavior block that used to trigger the loss.
+	resp, err := srv.CreateAgentFromConfig(ctx, &loomv1.CreateAgentRequest{
+		Config: &loomv1.AgentConfig{
+			Name:         "mastermind-pilot",
+			Description:  description,
+			SystemPrompt: systemPrompt,
+		},
+	})
+	require.NoError(t, err)
+	// AgentInfo.Metadata["description"] is read from the running agent, not the echoed config.
+	assert.Equal(t, description, resp.Metadata["description"])
+
+	ag, _, err := srv.getAgent(resp.Id)
+	require.NoError(t, err)
+	_, err = ag.Chat(ctx, "runtime-prompt-session", "Guess: red green blue yellow")
+	require.NoError(t, err)
+
+	system := llm.systemMessages()
+	sawPrompt := false
+	for _, msg := range system {
+		if strings.Contains(msg, systemPrompt) {
+			sawPrompt = true
+			break
+		}
+	}
+	assert.True(t, sawPrompt, "LLM never received the configured system_prompt; system messages: %q", system)
 }
 
 func TestAgentLifecycle_CreateAgentFromConfig_DuplicateNames(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"sort"
 	"strings"
@@ -527,7 +528,10 @@ func WithPrompts(registry prompts.PromptRegistry) Option {
 	}
 }
 
-// WithConfig sets the agent configuration.
+// WithConfig sets the agent configuration, replacing the whole Config. Options
+// apply in order, so any field set by an earlier option (WithName,
+// WithSystemPrompt, WithDescription, WithROM, WithMetadata, WithPatternConfig)
+// is discarded; pass WithConfig before them.
 func WithConfig(config *Config) Option {
 	return func(a *Agent) {
 		a.config = config
@@ -665,6 +669,24 @@ func WithSystemPrompt(prompt string) Option {
 func WithDescription(description string) Option {
 	return func(a *Agent) {
 		a.config.Description = description
+	}
+}
+
+// WithROM sets the ROM identifier ("TD", "teradata", "weaver", "auto", "none",
+// or "" for the base ROM only) that getSystemPrompt loads ahead of the system
+// prompt.
+func WithROM(rom string) Option {
+	return func(a *Agent) {
+		a.config.Rom = rom
+	}
+}
+
+// WithMetadata sets the agent metadata (backend_path drives ROM
+// auto-detection). The map is copied so later edits to the caller's map do
+// not reach the running agent.
+func WithMetadata(metadata map[string]string) Option {
+	return func(a *Agent) {
+		a.config.Metadata = maps.Clone(metadata)
 	}
 }
 
