@@ -147,6 +147,23 @@ func ensureConfigDefaults(config *loomv1.AgentConfig) {
 	}
 }
 
+func directAgentOptions(config *loomv1.AgentConfig) []agent.Option {
+	opts := []agent.Option{agent.WithName(config.Name)}
+	if config.Description != "" {
+		opts = append(opts, agent.WithDescription(config.Description))
+	}
+	if config.SystemPrompt != "" {
+		opts = append(opts, agent.WithSystemPrompt(config.SystemPrompt))
+	}
+	if config.Rom != "" {
+		opts = append(opts, agent.WithROM(config.Rom))
+	}
+	if len(config.Metadata) > 0 {
+		opts = append(opts, agent.WithMetadata(config.Metadata))
+	}
+	return opts
+}
+
 // CreateAgentFromConfig creates a new agent from the provided configuration or config file path.
 func (s *MultiAgentServer) CreateAgentFromConfig(ctx context.Context, req *loomv1.CreateAgentRequest) (*loomv1.AgentInfo, error) {
 	if req.Config == nil && req.ConfigPath == "" {
@@ -217,17 +234,7 @@ func (s *MultiAgentServer) CreateAgentFromConfig(ctx context.Context, req *loomv
 	// Fallback: create agent directly without registry (for testing or simple setups)
 	agentID := uuid.New().String()
 
-	opts := []agent.Option{
-		agent.WithName(agentConfig.Name),
-	}
-	if agentConfig.Description != "" {
-		opts = append(opts, agent.WithDescription(agentConfig.Description))
-	}
-	if agentConfig.SystemPrompt != "" {
-		opts = append(opts, agent.WithSystemPrompt(agentConfig.SystemPrompt))
-	}
-
-	ag := agent.NewAgent(nil, nil, opts...)
+	ag := agent.NewAgent(nil, nil, directAgentOptions(agentConfig)...)
 	ag.SetID(agentID)
 
 	s.AddAgent(agentID, ag)
@@ -534,17 +541,7 @@ func (s *MultiAgentServer) ReloadAgent(ctx context.Context, req *loomv1.ReloadAg
 			ag = newAgent
 		} else {
 			// Simple reload without registry: create new agent with updated opts
-			opts := []agent.Option{
-				agent.WithName(newConfig.Name),
-			}
-			if newConfig.Description != "" {
-				opts = append(opts, agent.WithDescription(newConfig.Description))
-			}
-			if newConfig.SystemPrompt != "" {
-				opts = append(opts, agent.WithSystemPrompt(newConfig.SystemPrompt))
-			}
-
-			newAgent := agent.NewAgent(nil, nil, opts...)
+			newAgent := agent.NewAgent(nil, nil, directAgentOptions(newConfig)...)
 			newAgent.SetID(resolvedID)
 
 			if updateErr := s.UpdateAgent(resolvedID, newAgent); updateErr != nil {
