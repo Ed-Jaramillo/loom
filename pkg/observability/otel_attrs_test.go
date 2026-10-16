@@ -429,8 +429,10 @@ func TestToOTelAttr_TypedValues(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := toOTelAttr("k", tt.in)
-			if got.Value.Type() != tt.want.Value.Type() || got.Value.Emit() != tt.want.Value.Emit() {
-				t.Errorf("toOTelAttr = %s %q, want %s %q", got.Value.Type(), got.Value.Emit(), tt.want.Value.Type(), tt.want.Value.Emit())
+			gotValue := got.Value.AsInterface()
+			wantValue := tt.want.Value.AsInterface()
+			if got.Value.Type() != tt.want.Value.Type() || !reflect.DeepEqual(gotValue, wantValue) {
+				t.Errorf("toOTelAttr = %s %v, want %s %v", got.Value.Type(), gotValue, tt.want.Value.Type(), wantValue)
 			}
 		})
 	}
