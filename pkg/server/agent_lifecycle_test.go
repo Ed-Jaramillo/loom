@@ -8,12 +8,16 @@ package server
 import (
 	"context"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	loomv1 "github.com/teradata-labs/loom/gen/go/loom/v1"
 	"github.com/teradata-labs/loom/pkg/agent"
+	llmtypes "github.com/teradata-labs/loom/pkg/llm/types"
+	"github.com/teradata-labs/loom/pkg/shuttle"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -119,6 +123,102 @@ func TestAgentLifecycle_CreateAgentFromConfig(t *testing.T) {
 			assert.Contains(t, agentIDs, resp.Id, "new agent should be in server's agents map")
 		})
 	}
+}
+
+type systemPromptRecordingLLM struct {
+	mu     sync.Mutex
+	system []string
+}
+
+func (m *systemPromptRecordingLLM) Chat(ctx context.Context, messages []llmtypes.Message, tools []shuttle.Tool) (*llmtypes.LLMResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, msg := range messages {
+		if msg.Role == "system" {
+			m.system = append(m.system, msg.Content)
+		}
+	}
+	return &llmtypes.LLMResponse{Content: "ok", StopReason: "end_turn"}, nil
+}
+
+func (m *systemPromptRecordingLLM) Name() string  { return "system-prompt-recorder" }
+func (m *systemPromptRecordingLLM) Model() string { return "recorder-model" }
+
+func (m *systemPromptRecordingLLM) systemMessages() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.system...)
+}
+
+func TestAgentLifecycle_CreateAgentFromConfig_RuntimeSystemPrompt(t *testing.T) {
+	const prompt = "Score each Mastermind guess against the secret code."
+	tmpDir := t.TempDir()
+	llm := &systemPromptRecordingLLM{}
+	registry, err := agent.NewRegistry(agent.RegistryConfig{
+		ConfigDir:   tmpDir,
+		DBPath:      filepath.Join(tmpDir, "registry.db"),
+		LLMProvider: llm,
+		Logger:      zaptest.NewLogger(t),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, registry.Close()) })
+
+	srv := newTestMultiAgentServer(t)
+	srv.SetAgentRegistry(registry)
+	ctx := context.Background()
+	resp, err := srv.CreateAgentFromConfig(ctx, &loomv1.CreateAgentRequest{
+		Config: &loomv1.AgentConfig{
+			Name:         "mastermind-pilot",
+			Description:  "Mastermind pilot agent",
+			SystemPrompt: prompt,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Mastermind pilot agent", resp.Metadata["description"])
+
+	ag, _, err := srv.getAgent(resp.Id)
+	require.NoError(t, err)
+	_, err = ag.Chat(ctx, "pilot-session", "Guess: red green blue yellow")
+	require.NoError(t, err)
+
+	found := false
+	for _, msg := range llm.systemMessages() {
+		found = found || strings.Contains(msg, prompt)
+	}
+	assert.True(t, found, "LLM never received the configured system prompt")
+}
+
+func TestAgentLifecycle_DirectConfigKeepsROMAndMetadata(t *testing.T) {
+	srv := newTestMultiAgentServer(t)
+	ctx := context.Background()
+	created, err := srv.CreateAgentFromConfig(ctx, &loomv1.CreateAgentRequest{
+		Config: &loomv1.AgentConfig{
+			Name:         "direct-agent",
+			SystemPrompt: "Test direct agent.",
+			Rom:          "none",
+			Metadata:     map[string]string{"backend_path": "backends/teradata.yaml"},
+		},
+	})
+	require.NoError(t, err)
+	before, _, err := srv.getAgent(created.Id)
+	require.NoError(t, err)
+	assert.Equal(t, "none", before.GetConfig().Rom)
+	assert.Equal(t, "backends/teradata.yaml", before.GetConfig().Metadata["backend_path"])
+
+	_, err = srv.ReloadAgent(ctx, &loomv1.ReloadAgentRequest{
+		AgentId: created.Id,
+		Config: &loomv1.AgentConfig{
+			Name:         "direct-agent",
+			SystemPrompt: "Updated direct agent.",
+			Rom:          "TD",
+			Metadata:     map[string]string{"backend_path": "backends/updated.yaml"},
+		},
+	})
+	require.NoError(t, err)
+	after, _, err := srv.getAgent(created.Id)
+	require.NoError(t, err)
+	assert.Equal(t, "TD", after.GetConfig().Rom)
+	assert.Equal(t, "backends/updated.yaml", after.GetConfig().Metadata["backend_path"])
 }
 
 func TestAgentLifecycle_CreateAgentFromConfig_DuplicateNames(t *testing.T) {

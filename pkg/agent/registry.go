@@ -585,6 +585,32 @@ func (r *Registry) CreateAgent(ctx context.Context, name string) (*Agent, error)
 	return agent, nil
 }
 
+func behaviorAgentConfig(config *loomv1.AgentConfig) *Config {
+	agentConfig := &Config{
+		MaxIterations:          int(config.Behavior.MaxIterations),
+		MaxToolExecutions:      int(config.Behavior.MaxToolExecutions),
+		MaxTurns:               int(config.Behavior.MaxTurns),
+		OutputTokenCBThreshold: int(config.Behavior.GetOutputTokenCbThreshold()),
+		EnableSelfHealing:      config.Metadata["_enable_self_healing"] != "false",
+	}
+	if agentConfig.MaxIterations == 0 {
+		agentConfig.MaxIterations = DefaultConfig().MaxIterations
+	}
+	if agentConfig.MaxToolExecutions == 0 {
+		agentConfig.MaxToolExecutions = 50
+	}
+	if agentConfig.MaxTurns == 0 {
+		agentConfig.MaxTurns = 25
+	}
+	if agentConfig.OutputTokenCBThreshold == 0 {
+		agentConfig.OutputTokenCBThreshold = 8
+	}
+	if sc := ExtractSkillsConfig(config.Metadata); sc != nil {
+		agentConfig.SkillsConfig = sc
+	}
+	return agentConfig
+}
+
 // buildAgent creates an agent instance from proto configuration
 func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (*Agent, error) {
 	// Create LLM provider from config.
@@ -607,10 +633,12 @@ func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (
 		llmProvider = llm.NewInstrumentedProvider(llmProvider, r.tracer)
 	}
 
-	// Build options from config
-	opts := []Option{
-		WithName(config.Name),
+	// WithConfig replaces the whole runtime Config, so apply field options after it.
+	var opts []Option
+	if config.Behavior != nil {
+		opts = append(opts, WithConfig(behaviorAgentConfig(config)))
 	}
+	opts = append(opts, WithName(config.Name))
 
 	// Create role-specific LLM providers (graceful degradation: warn on error, fallback to main LLM)
 	if config.JudgeLlm != nil && config.JudgeLlm.Provider != "" {
@@ -689,49 +717,30 @@ func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (
 		opts = append(opts, WithDescription(config.Description))
 	}
 
-	// Set behavior config (max_tool_executions, max_turns, output_token_cb_threshold) if provided
-	if config.Behavior != nil {
-		agentConfig := &Config{
-			Name:                   config.Name, // Preserve name from config
-			MaxToolExecutions:      int(config.Behavior.MaxToolExecutions),
-			MaxTurns:               int(config.Behavior.MaxTurns),
-			OutputTokenCBThreshold: int(config.Behavior.GetOutputTokenCbThreshold()),
-			EnableSelfHealing:      config.Metadata["_enable_self_healing"] != "false",
-		}
-		// Use defaults if not specified
-		if agentConfig.MaxToolExecutions == 0 {
-			agentConfig.MaxToolExecutions = 50
-		}
-		if agentConfig.MaxTurns == 0 {
-			agentConfig.MaxTurns = 25 // Default from config_loader.go:258
-		}
-		if agentConfig.OutputTokenCBThreshold == 0 {
-			agentConfig.OutputTokenCBThreshold = 8
-		}
-		// Extract skills config from metadata and attach to Go config
-		if sc := ExtractSkillsConfig(config.Metadata); sc != nil {
-			agentConfig.SkillsConfig = sc
-		}
-		opts = append(opts, WithConfig(agentConfig))
+	if config.Rom != "" {
+		opts = append(opts, WithROM(config.Rom))
+	}
+	if len(config.Metadata) > 0 {
+		opts = append(opts, WithMetadata(config.Metadata))
+	}
 
-		// Apply pattern config from YAML/proto if provided.
-		// Start from Go defaults, then overlay non-zero proto values. Bool fields
-		// are applied directly since the YAML parser already merged user values
-		// with sensible defaults before populating the proto message.
-		if config.Behavior.Patterns != nil {
-			pc := config.Behavior.Patterns
-			patternCfg := DefaultPatternConfig()
-			patternCfg.Enabled = pc.Enabled
-			patternCfg.EnableTracking = pc.EnableTracking
-			patternCfg.UseLLMClassifier = pc.UseLlmClassifier
-			if pc.MinConfidence > 0 {
-				patternCfg.MinConfidence = float64(pc.MinConfidence)
-			}
-			if pc.MaxPatternsPerTurn > 0 {
-				patternCfg.MaxPatternsPerTurn = int(pc.MaxPatternsPerTurn)
-			}
-			opts = append(opts, WithPatternConfig(patternCfg))
+	// Apply pattern config from YAML/proto if provided.
+	// Start from Go defaults, then overlay non-zero proto values. Bool fields
+	// are applied directly since the YAML parser already merged user values
+	// with sensible defaults before populating the proto message.
+	if config.Behavior != nil && config.Behavior.Patterns != nil {
+		pc := config.Behavior.Patterns
+		patternCfg := DefaultPatternConfig()
+		patternCfg.Enabled = pc.Enabled
+		patternCfg.EnableTracking = pc.EnableTracking
+		patternCfg.UseLLMClassifier = pc.UseLlmClassifier
+		if pc.MinConfidence > 0 {
+			patternCfg.MinConfidence = float64(pc.MinConfidence)
 		}
+		if pc.MaxPatternsPerTurn > 0 {
+			patternCfg.MaxPatternsPerTurn = int(pc.MaxPatternsPerTurn)
+		}
+		opts = append(opts, WithPatternConfig(patternCfg))
 	}
 
 	// Set tracer if provided
