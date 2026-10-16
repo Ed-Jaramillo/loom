@@ -3346,13 +3346,15 @@ func runServe(cmd *cobra.Command, args []string) {
 			agentOpts = append(agentOpts, agent.WithAdmissionHooks(admissionChain))
 			agentOpts = append(agentOpts, agent.WithIdentityResolver(postgres.UserIDFromContext))
 
-			// Wrap LLM provider with instrumentation for observability
+			// Wrap LLM provider with instrumentation for observability without
+			// mutating the shared outer llmProvider variable.
+			reloadLLM := llmProvider
 			if tracer != nil {
-				llmProvider = llm.NewInstrumentedProvider(llmProvider, tracer, llm.WithRole(llm.RoleAgent))
+				reloadLLM = llm.NewInstrumentedProvider(reloadLLM, tracer, llm.WithRole(llm.RoleAgent))
 			}
 
 			// Create new agent
-			newAgent := agent.NewAgent(backend, llmProvider, agentOpts...)
+			newAgent := agent.NewAgent(backend, reloadLLM, agentOpts...)
 
 			// Wire pattern effectiveness tracker for metrics collection
 			if patternTracker != nil {
