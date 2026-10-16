@@ -2558,6 +2558,7 @@ func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
 	toolExecutionCount := 0
 	var allToolExecutions []ToolExecution
 	var turnUsage Usage                         // sum of every successful LLM call this turn → Response.TurnUsage
+	llmCalls := 0                               // number of calls turnUsage sums → Metadata["llm_calls"]
 	emptyRetried := false                       // one-shot flag: retry empty LLM response at most once per conversation
 	hygieneRetries := 0                         // capped count of REQUIRE_FIX retries the end-of-turn auditor has triggered
 	var hygieneLast *hygiene.EnforcementOutcome // last outcome, surfaced into Response.Metadata
@@ -2815,6 +2816,7 @@ func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
 			return nil, fmt.Errorf("LLM call failed: %w", err)
 		}
 		addUsage(&turnUsage, llmResp.Usage)
+		llmCalls++
 		a.observePromptUsage(session, llmResp.Usage)
 
 		// Record LLM response on conversation_loop span
@@ -3023,6 +3025,7 @@ func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
 
 			meta := map[string]interface{}{
 				"turns":           turnCount,
+				"llm_calls":       llmCalls,
 				"tool_executions": toolExecutionCount,
 				"stop_reason":     llmResp.StopReason,
 				"empty_retried":   emptyRetried,
@@ -3133,7 +3136,7 @@ func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
 	// If we hit max turns/executions, make one final LLM call to synthesize results
 	// This ensures the agent provides meaningful output instead of a generic error message
 	emitProgress(ctx, StageSynthesis, 90, "Synthesizing tool execution results", "")
-	return a.synthesizeFinalResponse(ctx, session, turnCount, toolExecutionCount, allToolExecutions, turnUsage)
+	return a.synthesizeFinalResponse(ctx, session, turnCount, toolExecutionCount, allToolExecutions, turnUsage, llmCalls)
 }
 
 // batchState carries the loop-level state the per-call dispatch body reads
@@ -3517,7 +3520,7 @@ func (a *Agent) commitToolRow(ctx Context, session *Session, toolCall ToolCall, 
 // conversation loop exhausts its turn/execution budget, so the agent yields
 // meaningful output instead of a generic limit error. Moved verbatim from
 // the loop tail when the batch body was extracted into dispatchOneCall.
-func (a *Agent) synthesizeFinalResponse(ctx Context, session *Session, turnCount, toolExecutionCount int, allToolExecutions []ToolExecution, turnUsage Usage) (*Response, error) {
+func (a *Agent) synthesizeFinalResponse(ctx Context, session *Session, turnCount, toolExecutionCount int, allToolExecutions []ToolExecution, turnUsage Usage, llmCalls int) (*Response, error) {
 	// Add a synthesis request to the conversation
 	// Include explicit format instructions since they may have been compressed in context
 	synthesisPrompt := "You must provide your final answer NOW with whatever information you have gathered so far. Summarize your findings: what actions were taken, what results were produced, and any remaining steps the user would need to complete manually. Be concise and actionable. You MUST respond with text — do not return an empty response."
@@ -3565,6 +3568,7 @@ func (a *Agent) synthesizeFinalResponse(ctx Context, session *Session, turnCount
 			ToolExecutions: allToolExecutions,
 			Metadata: map[string]interface{}{
 				"turns":           turnCount,
+				"llm_calls":       llmCalls,
 				"tool_executions": toolExecutionCount,
 				"max_turns_hit":   turnCount >= a.config.MaxTurns,
 				"max_exec_hit":    toolExecutionCount >= a.config.MaxToolExecutions,
@@ -3580,6 +3584,7 @@ func (a *Agent) synthesizeFinalResponse(ctx Context, session *Session, turnCount
 	}
 
 	addUsage(&turnUsage, finalResp.Usage)
+	llmCalls++
 	return &Response{
 		Content:        content,
 		Usage:          finalResp.Usage,
@@ -3588,6 +3593,7 @@ func (a *Agent) synthesizeFinalResponse(ctx Context, session *Session, turnCount
 		Thinking:       finalResp.Thinking,
 		Metadata: map[string]interface{}{
 			"turns":           turnCount + 1, // Include synthesis turn
+			"llm_calls":       llmCalls,
 			"tool_executions": toolExecutionCount,
 			"max_turns_hit":   turnCount >= a.config.MaxTurns,
 			"max_exec_hit":    toolExecutionCount >= a.config.MaxToolExecutions,
