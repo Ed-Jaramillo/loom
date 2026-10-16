@@ -9,11 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### OpenInference attributes on OTLP spans
+- **Exported spans carry the OpenInference attributes Arize Phoenix uses.** Every span gets `openinference.span.kind` from its name (`llm.completion` → `LLM`; `agent.chat*` and `agent.conversation.resume` → `AGENT`; `agent.tool_execution`, `tool.execute`, `mcp.tools.call` → `TOOL`; `graph_memory.recall`, `memory.search_messages` → `RETRIEVER`; `memory.rerank_search_results` → `RERANKER`; others → `CHAIN`), and `input.value` / `output.value` from the message and response previews. LLM spans add `llm.token_count.prompt` (uncached input plus cache reads and writes), `llm.token_count.completion`, `llm.token_count.total`, `llm.token_count.prompt_details.cache_read` / `cache_write` and `llm.cost.total`. Keys a span already sets win. `llm.provider`, `llm.system` and `llm.model_name` are left to the backend, which derives them from `gen_ai.*`. See `docs/architecture/otlp-integration.md`.
+
 #### Tool-call progress while arguments stream
 - **Providers can report which tool call is being written, and how much.** `types.ToolInputProgress` (index, id, name, argument bytes so far) is reported through `types.WithToolInputProgress` / `NotifyToolInputProgress`, alongside the existing content-free stream-activity pulse. The OpenAI-compatible client (so LiteLLM, Mistral and HuggingFace too) reports it per tool-call delta; other providers still send only the bare pulse. `chatWithStreaming` emits it as `ProgressEvent.IsToolInputStream` with `ToolCallID`, `ToolName` and the new `ToolInputBytes`: the first delta of each call, and the delta that first supplies its name or id, immediately, later ones at most once a second per call.
 - **`WeaveProgress` carries it to gRPC clients.** New fields `is_tool_input_stream` (22) and `tool_input_bytes` (23); `tool_call_id` is now also set on these events, so a non-empty `tool_call_id` no longer implies the tool started. See `docs/reference/streaming.md`.
 
 ### Fixed
+
+#### OTLP export: trace identity and cache tokens
+- **`OTelTracer` spans carry the IDs the backend stores.** Loom spans received fresh UUIDs while the OTel SDK assigned its own trace and span IDs, so `TraceIDFromContext` never matched the exported trace, and spans started after their parent ended (async memory extraction) were exported into a new trace under a parent that was never exported. `StartSpan` now adopts the SDK span context's IDs.
+- **Cache token attributes use the OTel names.** `llm.tokens.cache_read` / `cache_write` exported as `gen_ai.usage.cache_read_input_tokens` / `cache_creation_input_tokens`; the OTel GenAI keys are `gen_ai.usage.cache_read.input_tokens` / `gen_ai.usage.cache_creation.input_tokens`, so backends reading the spec names saw no cache tokens.
 
 #### Registry-created agents keep their configuration
 - Registry agents retain their configured system prompt, description, ROM and metadata when behavior settings are present. `behavior.max_iterations` now reaches the runtime from registry, startup and YAML-watch configurations alongside the other behavior limits. Agents the server creates directly also keep ROM and metadata, and YAML saves preserve `rom`.
@@ -94,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trusted startup configuration supports single-pass `${VAR}` expansion; bare dollar signs are preserved, `$$` emits a literal dollar sign, and unresolved placeholders remain visible for diagnostics.
 
 ### Changed
+
+- **OTLP attribute names.** `llm.provider` is also exported as `gen_ai.provider.name`, and its normalized values follow current OTel GenAI provider names: `azure-openai` → `azure.ai.openai` (was `azure_openai`), `gemini` → `gcp.gemini` (was `google.generative_ai`), `mistral` → `mistral_ai` (was `mistral`). Agent-level `conversation.tokens.*`, `conversation.cost.usd` and `conversation.stop_reason` now export as `loom.conversation.*` instead of `gen_ai.usage.*` / `gen_ai.response.finish_reasons`, so backends that sum usage over a trace stop counting a turn's tokens twice. `agent.id` exports as `gen_ai.agent.id`, `agent.name` as `agent.name` and `gen_ai.agent.name`, and OpenInference / OTel keys (`input.*`, `output.*`, `openinference.*`, `llm.token_count.*`, `gen_ai.*`, `tool.description`, …) are no longer `loom.`-prefixed. Dashboards keyed on the old names need updating.
 
 - The default implicit trigger set is now exactly the set the runtime fires (`tool_call`, `human_request`); `subagent_spawn` was in the default while nothing fired it. An enabled policy whose triggers cannot fire is logged at agent wiring.
 - The agent config loader warns when a `task_board` block is written anywhere other than `memory.task_board`, where it is silently ignored.
