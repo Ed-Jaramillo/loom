@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Keep the eval_runs record while exporting over OTLP
+- **`observability.otlp_record_eval_runs: true`** (with `storage_type: sqlite` and `sqlite_path`) makes `mode: otel` also write the embedded-mode `eval_runs`, `evals` and `eval_metrics` rows, so analysis that reads `observability.db` keeps working while spans go to Phoenix or another OTLP backend. Rows match `mode: embedded`: Loom-native attribute names, written before export redaction and before the `otlp_include_spans` filter; `id` is the OTel span ID. `EvalRunRecorder` now holds the storage half of `EmbeddedTracer`, which delegates to it with no behavior change. `Validate` rejects the key without SQLite storage.
+
 #### Configurable span content length for OTLP export
 - **`observability.otlp_max_content_length`** sets how many runes of message, response and recall-query previews are recorded on spans while OTLP export is active (default 200, unchanged; `0` keeps content whole; negative values are rejected). The two private 200-rune truncation helpers in `pkg/agent` and `pkg/llm` are replaced by `observability.TruncateContent`. PII and credential redaction stay on and apply at any length. `looms serve` and `looms workflow` now build the OTLP tracer through one shared helper.
 
