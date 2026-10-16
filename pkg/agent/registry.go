@@ -1935,38 +1935,39 @@ func (r *Registry) ForceReload(ctx context.Context, name string) error {
 		return fmt.Errorf("reloaded config name %q differs from agent %q", config.Name, name)
 	}
 
-	// Update registry's configs map
-	r.mu.Lock()
-	r.configs[name] = config
-	r.mu.Unlock()
-
-	// Call reload callback if set
 	r.mu.RLock()
 	callback := r.onReload
 	r.mu.RUnlock()
 
-	if callback != nil {
-		// Get agent GUID for callback
-		agentGUID := ""
-		if info, err := r.GetAgentInfo(name); err == nil {
-			agentGUID = info.ID
-		} else {
-			r.logger.Warn("Could not get GUID for force-reload callback",
-				zap.String("agent", name),
-				zap.Error(err))
-		}
-
-		if err := callback(name, agentGUID, config); err != nil {
-			return fmt.Errorf("reload callback failed: %w", err)
-		}
-		r.logger.Info("Agent force-reloaded successfully", zap.String("agent", name))
-	} else {
-		// Fallback to internal reload if no callback set
+	// Without a host callback the registry rebuilds the agent itself:
+	// ReloadAgent reads the file again and commits the config together with
+	// the rebuilt agent.
+	if callback == nil {
 		if err := r.ReloadAgent(ctx, name); err != nil {
 			return fmt.Errorf("failed to reload agent: %w", err)
 		}
+		return nil
 	}
 
+	// Get agent GUID for callback
+	agentGUID := ""
+	if info, err := r.GetAgentInfo(name); err == nil {
+		agentGUID = info.ID
+	} else {
+		r.logger.Warn("Could not get GUID for force-reload callback",
+			zap.String("agent", name),
+			zap.Error(err))
+	}
+
+	if err := callback(name, agentGUID, config); err != nil {
+		return fmt.Errorf("reload callback failed: %w", err)
+	}
+	// Record the config only once the callback has replaced the agent, so a
+	// failed reload leaves the config that matches the agent still running.
+	r.mu.Lock()
+	r.configs[name] = config
+	r.mu.Unlock()
+	r.logger.Info("Agent force-reloaded successfully", zap.String("agent", name))
 	return nil
 }
 
@@ -2091,11 +2092,6 @@ func (r *Registry) WatchConfigs(ctx context.Context) error {
 							continue
 						}
 
-						// Update registry's configs map
-						r.mu.Lock()
-						r.configs[config.Name] = config
-						r.mu.Unlock()
-
 						// Call reload callback if set
 						if callback != nil {
 							// Get agent GUID for callback
@@ -2111,12 +2107,19 @@ func (r *Registry) WatchConfigs(ctx context.Context) error {
 									zap.String("guid", agentGUID),
 									zap.Error(err))
 							} else {
+								r.mu.Lock()
+								r.configs[config.Name] = config
+								r.mu.Unlock()
 								r.logger.Info("Workflow agent reloaded successfully",
 									zap.String("workflow", name),
 									zap.String("agent", config.Name),
 									zap.String("guid", agentGUID))
 							}
 						} else {
+							r.mu.Lock()
+							r.configs[config.Name] = config
+							r.mu.Unlock()
+
 							// Fallback to internal reload if no callback set
 							if err := r.ReloadAgent(ctx, config.Name); err != nil {
 								r.logger.Error("Failed to reload workflow agent",
@@ -2127,99 +2130,7 @@ func (r *Registry) WatchConfigs(ctx context.Context) error {
 						}
 					}
 				} else {
-					// Load single agent config
-					config, err := LoadAgentConfig(event.Name)
-					if err != nil {
-						r.logger.Error("Failed to load config file",
-							zap.String("agent", name),
-							zap.Error(err))
-						continue
-					}
-
-					// Validate config
-					if err := ValidateAgentConfig(config); err != nil {
-						r.logger.Error("Invalid agent config",
-							zap.String("agent", name),
-							zap.Error(err))
-						continue
-					}
-
-					// Update registry's configs map
-					r.mu.Lock()
-					r.configs[name] = config
-					r.mu.Unlock()
-
-					// Call reload callback if set
-					r.mu.RLock()
-					callback := r.onReload
-					r.mu.RUnlock()
-
-					if callback != nil {
-						// Get agent GUID for callback
-						agentGUID := ""
-						info, err := r.GetAgentInfo(name)
-						if err == nil {
-							// Agent exists in database, use its stable GUID
-							agentGUID = info.ID
-						} else {
-							// Agent is NEW (just created), generate and persist stable GUID
-							r.logger.Info("New agent detected, generating stable GUID",
-								zap.String("agent", name))
-
-							// Generate new stable GUID
-							agentGUID = uuid.New().String()
-
-							// Create agent info
-							now := time.Now()
-							newInfo := &AgentInstanceInfo{
-								ID:             agentGUID,
-								Name:           name,
-								Status:         "initializing",
-								CreatedAt:      now,
-								UpdatedAt:      now,
-								ActiveSessions: 0,
-								TotalMessages:  0,
-							}
-
-							// Persist to database BEFORE callback
-							// This ensures GetAgentInfo will work correctly for subsequent operations
-							if err := r.persistAgentInfo(newInfo, config); err != nil {
-								r.logger.Error("Failed to persist new agent info",
-									zap.String("agent", name),
-									zap.String("guid", agentGUID),
-									zap.Error(err))
-								// Continue anyway with the GUID we generated
-							} else {
-								r.logger.Info("New agent persisted to registry",
-									zap.String("agent", name),
-									zap.String("guid", agentGUID))
-
-								// Update in-memory maps so GetAgentInfo can find it
-								r.mu.Lock()
-								r.agentInfo[agentGUID] = newInfo
-								r.agentsByName[name] = agentGUID
-								r.mu.Unlock()
-							}
-						}
-
-						if err := callback(name, agentGUID, config); err != nil {
-							r.logger.Error("Reload callback failed",
-								zap.String("agent", name),
-								zap.String("guid", agentGUID),
-								zap.Error(err))
-						} else {
-							r.logger.Info("Agent reloaded successfully",
-								zap.String("agent", name),
-								zap.String("guid", agentGUID))
-						}
-					} else {
-						// Fallback to internal reload if no callback set
-						if err := r.ReloadAgent(ctx, name); err != nil {
-							r.logger.Error("Failed to reload agent",
-								zap.String("agent", name),
-								zap.Error(err))
-						}
-					}
+					r.reloadAgentFile(ctx, event.Name, name)
 				}
 			}
 
@@ -2234,6 +2145,116 @@ func (r *Registry) WatchConfigs(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// reloadAgentFile applies a changed agent YAML file. The registry config is
+// updated only after the reload succeeds (by the host's reload callback, or by
+// ReloadAgent, which commits the config together with the rebuilt agent), so a
+// failed reload leaves the config that matches the agent still running. A file
+// for an agent that is not registered yet only records its config, which
+// CreateAgent builds from.
+func (r *Registry) reloadAgentFile(ctx context.Context, path, name string) {
+	config, err := LoadAgentConfig(path)
+	if err != nil {
+		r.logger.Error("Failed to load config file",
+			zap.String("agent", name),
+			zap.Error(err))
+		return
+	}
+
+	if err := ValidateAgentConfig(config); err != nil {
+		r.logger.Error("Invalid agent config",
+			zap.String("agent", name),
+			zap.Error(err))
+		return
+	}
+	if config.Name != name {
+		r.logger.Error("Agent config name differs from its file name",
+			zap.String("file", path),
+			zap.String("agent", name),
+			zap.String("config_name", config.Name))
+		return
+	}
+
+	r.mu.RLock()
+	callback := r.onReload
+	r.mu.RUnlock()
+
+	if callback == nil {
+		if _, err := r.GetAgentInfo(name); err != nil {
+			r.mu.Lock()
+			r.configs[name] = config
+			r.mu.Unlock()
+			return
+		}
+		if err := r.ReloadAgent(ctx, name); err != nil {
+			r.logger.Error("Failed to reload agent",
+				zap.String("agent", name),
+				zap.Error(err))
+		}
+		return
+	}
+
+	// Get agent GUID for callback
+	agentGUID := ""
+	info, err := r.GetAgentInfo(name)
+	if err == nil {
+		// Agent exists in database, use its stable GUID
+		agentGUID = info.ID
+	} else {
+		// Agent is NEW (just created), generate and persist stable GUID
+		r.logger.Info("New agent detected, generating stable GUID",
+			zap.String("agent", name))
+
+		// Generate new stable GUID
+		agentGUID = uuid.New().String()
+
+		// Create agent info
+		now := time.Now()
+		newInfo := &AgentInstanceInfo{
+			ID:             agentGUID,
+			Name:           name,
+			Status:         "initializing",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			ActiveSessions: 0,
+			TotalMessages:  0,
+		}
+
+		// Persist to database BEFORE callback
+		// This ensures GetAgentInfo will work correctly for subsequent operations
+		if err := r.persistAgentInfo(newInfo, config); err != nil {
+			r.logger.Error("Failed to persist new agent info",
+				zap.String("agent", name),
+				zap.String("guid", agentGUID),
+				zap.Error(err))
+			// Continue anyway with the GUID we generated
+		} else {
+			r.logger.Info("New agent persisted to registry",
+				zap.String("agent", name),
+				zap.String("guid", agentGUID))
+
+			// Update in-memory maps so GetAgentInfo can find it
+			r.mu.Lock()
+			r.agentInfo[agentGUID] = newInfo
+			r.agentsByName[name] = agentGUID
+			r.mu.Unlock()
+		}
+	}
+
+	if err := callback(name, agentGUID, config); err != nil {
+		r.logger.Error("Reload callback failed",
+			zap.String("agent", name),
+			zap.String("guid", agentGUID),
+			zap.Error(err))
+		return
+	}
+	r.mu.Lock()
+	r.configs[name] = config
+	r.mu.Unlock()
+	r.logger.Info("Agent reloaded successfully",
+		zap.String("agent", name),
+		zap.String("guid", agentGUID))
 }
 
 // persistAgentInfo persists agent info to the database.
