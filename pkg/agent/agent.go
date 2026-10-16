@@ -1958,6 +1958,7 @@ func (a *Agent) chat(ctx context.Context, sessionID string, userMessage string, 
 	span.SetAttribute("llm.model", currentLLM.Model())
 	span.SetAttribute("config.max_turns", a.config.MaxTurns)
 	span.SetAttribute("config.max_tool_executions", a.config.MaxToolExecutions)
+	a.setAgentSpanIdentity(ctx, span)
 
 	// Record conversation started event
 	startedEvent := map[string]interface{}{
@@ -2052,6 +2053,7 @@ func (a *Agent) chat(ctx context.Context, sessionID string, userMessage string, 
 	// the attribution as soon as it is set.
 	ctx, taskBinding := taskctx.ContextWithBinding(ctx)
 	turnIndex := userMsg.Turn
+	span.SetAttribute("session.turn", turnIndex)
 
 	// Create agent context (a nil progressCallback is fine — no events emitted)
 	agentCtx := &agentContext{
@@ -2211,8 +2213,39 @@ func (a *Agent) chat(ctx context.Context, sessionID string, userMessage string, 
 	})
 
 	a.recordConversationMetrics(sessionID, response, duration)
+	setResponseTraceID(response, span)
 
 	return response, nil
+}
+
+// setAgentSpanIdentity records which agent a turn span belongs to, and one
+// OpenInference metadata attribute (a JSON object string) holding
+// graph_memory_enabled plus the span metadata found in ctx (the experiment
+// tags the server copies from WeaveRequest.context).
+func (a *Agent) setAgentSpanIdentity(ctx context.Context, span *observability.Span) {
+	span.SetAttribute("agent.id", a.GetID())
+	span.SetAttribute("agent.name", a.config.Name)
+	md := map[string]interface{}{
+		"graph_memory_enabled": a.graphMemoryStore != nil && a.graphMemoryConfig != nil && a.graphMemoryConfig.Enabled,
+	}
+	for k, v := range observability.SpanMetadataFromContext(ctx) {
+		md[k] = v
+	}
+	if b, err := json.Marshal(md); err == nil {
+		span.SetAttribute("metadata", string(b))
+	}
+}
+
+// setResponseTraceID records the turn's trace ID in the response metadata, so
+// a caller can find the turn in the trace backend.
+func setResponseTraceID(response *Response, span *observability.Span) {
+	if response == nil || span == nil || span.TraceID == "" {
+		return
+	}
+	if response.Metadata == nil {
+		response.Metadata = make(map[string]interface{})
+	}
+	response.Metadata["trace_id"] = span.TraceID
 }
 
 // recordConversationMetrics emits the six metrics that describe one completed
@@ -2497,9 +2530,12 @@ func extractHITLInfo(input map[string]interface{}) *HITLRequestInfo {
 // This implements the core agent behavior: LLM generates tool calls,
 // we execute them, feed results back to LLM, repeat until completion.
 func (a *Agent) runConversationLoop(ctx Context) (*Response, error) {
-	// Start trace span — always created; NoOpTracer handles disabled case
-	_, span := ctx.Tracer().StartSpan(ctx, "agent.conversation_loop")
+	// Start trace span — always created; NoOpTracer handles disabled case.
+	// Everything below runs under it, so LLM and tool spans nest under the
+	// loop span rather than under agent.chat.
+	loopCtx, span := ctx.Tracer().StartSpan(ctx, "agent.conversation_loop")
 	defer ctx.Tracer().EndSpan(span)
+	ctx = withSpanContext(ctx, loopCtx)
 
 	session := ctx.Session()
 
@@ -3215,12 +3251,16 @@ func (a *Agent) dispatchOneCall(ctx Context, session *Session, toolCall ToolCall
 		emitToolStarted(ctx, 50+clampInt32(*st.toolExecutionCount*5), toolCall)
 	}
 
-	// Execute tool with tracing — always created
-	_, toolSpan := ctx.Tracer().StartSpan(ctx, "agent.tool_execution")
-	toolSpan.SetAttribute("tool_name", toolCall.Name)
+	// Execute tool with tracing — always created. The span ends when this
+	// call returns, after the tool row is committed, so an error the commit
+	// records on it is exported with it.
+	toolCtx, toolSpan := ctx.Tracer().StartSpan(ctx, "agent.tool_execution")
+	defer ctx.Tracer().EndSpan(toolSpan)
+	setToolSpanInput(toolSpan, toolCall)
 
-	// Execute with self-correction (circuit breaker + SQL correction)
-	result, err := a.executeToolWithSelfCorrection(ctx, toolCall.Name, toolCall.Input, session.ID)
+	// Execute with self-correction (circuit breaker + SQL correction). Spans
+	// the tool starts nest under the tool span.
+	result, err := a.executeToolWithSelfCorrection(withSpanContext(ctx, toolCtx), toolCall.Name, toolCall.Input, session.ID)
 
 	// Tier 1: if tool CB fired, disable tool and inject synthetic result.
 	if err != nil && strings.Contains(err.Error(), "circuit breaker open") && st.recovery != nil {
@@ -3286,11 +3326,13 @@ func (a *Agent) dispatchOneCall(ctx Context, session *Session, toolCall ToolCall
 			toolSpan.SetAttribute("error.message", result.Error.Message)
 		}
 
-		toolSpan.SetAttribute("success", fmt.Sprintf("%t", success))
+		toolSpan.SetAttribute("success", success)
 		if result != nil {
-			toolSpan.SetAttribute("execution_time_ms", fmt.Sprintf("%d", result.ExecutionTimeMs))
+			toolSpan.SetAttribute("execution_time_ms", result.ExecutionTimeMs)
 		}
-		ctx.Tracer().EndSpan(toolSpan)
+		if out := toolOutputPreview(result, err); out != "" {
+			toolSpan.SetAttribute("output.value", out)
+		}
 	}
 
 	// Resource-await hold (park_resource.go): a successful result asking to be
@@ -3302,6 +3344,47 @@ func (a *Agent) dispatchOneCall(ctx Context, session *Session, toolCall ToolCall
 	}
 
 	a.commitToolRow(ctx, session, toolCall, st, result, err, toolSpan)
+}
+
+// setToolSpanInput records the call on an agent.tool_execution span: the tool
+// name, the OTel GenAI operation and call ID, and the arguments as
+// OpenInference input.value, bounded by TruncateContent. input.mime_type is
+// set only when the arguments are whole, since truncated JSON is not JSON.
+func setToolSpanInput(span *observability.Span, call ToolCall) {
+	span.SetAttribute("tool_name", call.Name)
+	span.SetAttribute(observability.AttrToolName, call.Name)
+	span.SetAttribute("gen_ai.operation.name", "execute_tool")
+	if call.ID != "" {
+		span.SetAttribute("gen_ai.tool.call.id", call.ID)
+	}
+	args := canonicalJSON(call.Input)
+	in := observability.TruncateContent(args)
+	span.SetAttribute("input.value", in)
+	if in == args {
+		span.SetAttribute("input.mime_type", "application/json")
+	}
+}
+
+// toolOutputPreview renders a tool result for the tool span's output.value:
+// the error for a failed call, else the result data (a string as it is,
+// anything else as JSON), bounded by TruncateContent.
+func toolOutputPreview(result *shuttle.Result, err error) string {
+	switch {
+	case err != nil:
+		return observability.TruncateContent("error: " + err.Error())
+	case result == nil:
+		return ""
+	case !result.Success && result.Error != nil:
+		return observability.TruncateContent("error: " + result.Error.Code + ": " + result.Error.Message)
+	}
+	if s, ok := result.Data.(string); ok {
+		return observability.TruncateContent(s)
+	}
+	b, err := json.Marshal(result.Data)
+	if err != nil {
+		return observability.TruncateContent(fmt.Sprintf("%v", result.Data))
+	}
+	return observability.TruncateContent(string(b))
 }
 
 // commitToolRow is the commit tail of dispatchOneCall — execution record,
