@@ -494,15 +494,37 @@ func (s *MultiAgentServer) ReloadAgent(ctx context.Context, req *loomv1.ReloadAg
 	if req.ReloadFromFile {
 		// Delegate to registry for file-based reload
 		if s.registry != nil {
-			if reloadErr := s.registry.ReloadAgent(ctx, resolvedID); reloadErr != nil {
-				return nil, status.Errorf(codes.Internal, "failed to reload agent from file: %v", reloadErr)
+			var refreshed *agent.Agent
+			if s.registry.OwnsRuntimeAgent(ag) {
+				if reloadErr := s.registry.ReloadAgent(ctx, resolvedID); reloadErr != nil {
+					return nil, status.Errorf(codes.Internal, "failed to reload agent from file: %v", reloadErr)
+				}
+				refreshed, err = s.registry.GetAgent(ctx, resolvedID)
+				if err != nil {
+					return nil, status.Errorf(codes.Internal, "failed to retrieve reloaded agent: %v", err)
+				}
+				if updateErr := s.UpdateAgent(resolvedID, refreshed); updateErr != nil {
+					return nil, status.Errorf(codes.Internal, "failed to update reloaded agent: %v", updateErr)
+				}
+			} else if s.registry.HasReloadCallback() {
+				if reloadErr := s.registry.ForceReload(ctx, ag.GetName()); reloadErr != nil {
+					return nil, status.Errorf(codes.Internal, "failed to reload agent from file: %v", reloadErr)
+				}
+				refreshed, _, err = s.getAgent(resolvedID)
+				if err != nil {
+					return nil, status.Errorf(codes.Internal, "failed to retrieve reloaded agent: %v", err)
+				}
+				if refreshed == ag {
+					return nil, status.Errorf(codes.Internal, "reload callback did not replace agent %q", resolvedID)
+				}
+			} else {
+				return nil, status.Errorf(codes.FailedPrecondition, "agent %q has no registry runtime or reload callback", resolvedID)
 			}
-
-			// Retrieve updated agent info from registry
-			info, infoErr := s.registry.GetAgentInfo(resolvedID)
-			if infoErr == nil {
-				newConfig = s.registry.GetConfig(info.Name)
+			newConfig = s.registry.GetConfig(refreshed.GetName())
+			if newConfig == nil {
+				return nil, status.Errorf(codes.Internal, "reloaded agent %q has no config", refreshed.GetName())
 			}
+			ag = refreshed
 		} else {
 			return nil, status.Error(codes.FailedPrecondition, "reload_from_file requires an agent registry; no registry configured")
 		}
