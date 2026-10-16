@@ -1800,10 +1800,19 @@ func (r *Registry) DeleteAgent(ctx context.Context, nameOrID string, force bool)
 	return nil
 }
 
+// OwnsRuntimeAgent reports whether the registry built the active agent instance.
+func (r *Registry) OwnsRuntimeAgent(ag *Agent) bool {
+	if ag == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.agents[ag.GetName()] == ag
+}
+
 // ReloadAgent hot-reloads an agent's configuration by name or GUID
 func (r *Registry) ReloadAgent(ctx context.Context, nameOrID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
 
 	// Try GUID lookup first
 	info, exists := r.agentInfo[nameOrID]
@@ -1811,16 +1820,23 @@ func (r *Registry) ReloadAgent(ctx context.Context, nameOrID string) error {
 		// Fall back to name lookup
 		agentID, nameExists := r.agentsByName[nameOrID]
 		if !nameExists {
+			r.mu.RUnlock()
 			return fmt.Errorf("agent not found: %s", nameOrID)
 		}
 		info, exists = r.agentInfo[agentID]
 		if !exists {
+			r.mu.RUnlock()
 			return fmt.Errorf("agent not found: %s", nameOrID)
 		}
 	}
+	name, id := info.Name, info.ID
+	wasRunning := info.Status == "running"
+	previousAgent := r.agents[name]
+	previousConfig := r.configs[name]
+	r.mu.RUnlock()
 
 	// Reload config from file
-	configPath := filepath.Join(r.configDir, "agents", info.Name+".yaml")
+	configPath := filepath.Join(r.configDir, "agents", name+".yaml")
 	config, err := LoadAgentConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
@@ -1829,22 +1845,40 @@ func (r *Registry) ReloadAgent(ctx context.Context, nameOrID string) error {
 	if err := ValidateAgentConfig(config); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
+	if config.Name != name {
+		return fmt.Errorf("reloaded config name %q differs from agent %q", config.Name, name)
+	}
 
-	r.configs[info.Name] = config
-	info.UpdatedAt = time.Now()
-
-	// If agent is running, rebuild it
-	if info.Status == "running" {
-		agent, err := r.buildAgent(ctx, config)
+	var replacement *Agent
+	if previousAgent != nil || wasRunning {
+		replacement, err = r.buildAgent(ctx, config)
 		if err != nil {
 			return fmt.Errorf("failed to rebuild agent: %w", err)
 		}
-		r.agents[info.Name] = agent
+		replacement.SetID(id)
 	}
 
+	r.mu.Lock()
+	current, exists := r.agentInfo[id]
+	if !exists || current.Name != name || r.agentsByName[name] != id ||
+		r.agents[name] != previousAgent || r.configs[name] != previousConfig {
+		r.mu.Unlock()
+		return fmt.Errorf("agent %q changed while reloading", name)
+	}
+	if current.Status == "running" && replacement == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("agent %q is running without a runtime instance", name)
+	}
+	r.configs[name] = config
+	current.UpdatedAt = time.Now()
+	if replacement != nil {
+		r.agents[name] = replacement
+	}
+	r.mu.Unlock()
+
 	r.logger.Info("Agent config reloaded",
-		zap.String("name", info.Name),
-		zap.String("id", info.ID))
+		zap.String("name", name),
+		zap.String("id", id))
 
 	return nil
 }
@@ -1855,6 +1889,13 @@ func (r *Registry) SetReloadCallback(cb ReloadCallback) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onReload = cb
+}
+
+// HasReloadCallback reports whether file reloads are handled by the host server.
+func (r *Registry) HasReloadCallback() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.onReload != nil
 }
 
 // SetSharedMemory sets the SharedMemoryStore for agents created by this registry.
@@ -1881,6 +1922,9 @@ func (r *Registry) ForceReload(ctx context.Context, name string) error {
 	// Validate config
 	if err := ValidateAgentConfig(config); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
+	}
+	if config.Name != name {
+		return fmt.Errorf("reloaded config name %q differs from agent %q", config.Name, name)
 	}
 
 	// Update registry's configs map

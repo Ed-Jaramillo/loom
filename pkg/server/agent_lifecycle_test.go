@@ -221,6 +221,172 @@ func TestAgentLifecycle_DirectConfigKeepsROMAndMetadata(t *testing.T) {
 	assert.Equal(t, "backends/updated.yaml", after.GetConfig().Metadata["backend_path"])
 }
 
+func TestAgentLifecycle_ReloadFromFileUpdatesRuntimePrompt(t *testing.T) {
+	const (
+		oldPrompt = "Use the old experiment rules."
+		newPrompt = "Use the updated experiment rules."
+	)
+	tmpDir := t.TempDir()
+	llm := &systemPromptRecordingLLM{}
+	registry, err := agent.NewRegistry(agent.RegistryConfig{
+		ConfigDir:   tmpDir,
+		DBPath:      filepath.Join(tmpDir, "registry.db"),
+		LLMProvider: llm,
+		Logger:      zaptest.NewLogger(t),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, registry.Close()) })
+
+	srv := newTestMultiAgentServer(t)
+	srv.SetAgentRegistry(registry)
+	ctx := context.Background()
+	created, err := srv.CreateAgentFromConfig(ctx, &loomv1.CreateAgentRequest{
+		Config: &loomv1.AgentConfig{
+			Name:         "file-reload-agent",
+			Description:  "Old description",
+			SystemPrompt: oldPrompt,
+		},
+	})
+	require.NoError(t, err)
+	before, _, err := srv.getAgent(created.Id)
+	require.NoError(t, err)
+
+	updated := &loomv1.AgentConfig{
+		Name:         "file-reload-agent",
+		Description:  "New description",
+		SystemPrompt: newPrompt,
+		Rom:          "none",
+		Behavior:     &loomv1.BehaviorConfig{MaxIterations: 2},
+	}
+	require.NoError(t, agent.SaveAgentConfig(updated, filepath.Join(tmpDir, "agents", updated.Name+".yaml")))
+	response, err := srv.ReloadAgent(ctx, &loomv1.ReloadAgentRequest{AgentId: created.Id, ReloadFromFile: true})
+	require.NoError(t, err)
+	assert.Equal(t, updated.Description, response.Metadata["description"])
+	assert.Equal(t, updated.SystemPrompt, response.Config.SystemPrompt)
+
+	after, _, err := srv.getAgent(created.Id)
+	require.NoError(t, err)
+	assert.NotSame(t, before, after)
+	assert.Equal(t, created.Id, after.GetID())
+	assert.Equal(t, updated.Rom, after.GetConfig().Rom)
+	assert.Equal(t, 2, after.GetConfig().MaxIterations)
+	_, err = after.Chat(ctx, "reloaded-session", "Guess: red green blue yellow")
+	require.NoError(t, err)
+	system := llm.systemMessages()
+	require.NotEmpty(t, system)
+	assert.Contains(t, system[len(system)-1], newPrompt)
+	assert.NotContains(t, system[len(system)-1], oldPrompt)
+}
+
+func TestAgentLifecycle_ReloadFromFileUsesServerCallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	llm := &systemPromptRecordingLLM{}
+	registry, err := agent.NewRegistry(agent.RegistryConfig{
+		ConfigDir:   tmpDir,
+		DBPath:      filepath.Join(tmpDir, "registry.db"),
+		LLMProvider: llm,
+		Logger:      zaptest.NewLogger(t),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, registry.Close()) })
+
+	srv := newTestMultiAgentServer(t)
+	srv.SetAgentRegistry(registry)
+	ctx := context.Background()
+	config := &loomv1.AgentConfig{Name: "callback-agent", SystemPrompt: "Old rules."}
+	require.NoError(t, agent.SaveAgentConfig(config, filepath.Join(tmpDir, "agents", config.Name+".yaml")))
+	require.NoError(t, registry.LoadAgents(ctx))
+	info, err := registry.GetAgentInfo(config.Name)
+	require.NoError(t, err)
+	before := agent.NewAgent(&mockBackend{}, llm, agent.WithName(config.Name), agent.WithSystemPrompt(config.SystemPrompt))
+	before.SetID(info.ID)
+	srv.AddAgent(info.ID, before)
+
+	var callbackAgent *agent.Agent
+	registry.SetReloadCallback(func(name, guid string, updated *loomv1.AgentConfig) error {
+		callbackAgent = agent.NewAgent(&mockBackend{}, llm,
+			agent.WithName(name),
+			agent.WithSystemPrompt(updated.SystemPrompt),
+			agent.WithDescription(updated.Description))
+		callbackAgent.SetID(guid)
+		return srv.UpdateAgent(guid, callbackAgent)
+	})
+
+	config.Description = "Updated via callback"
+	config.SystemPrompt = "New rules."
+	require.NoError(t, agent.SaveAgentConfig(config, filepath.Join(tmpDir, "agents", config.Name+".yaml")))
+	response, err := srv.ReloadAgent(ctx, &loomv1.ReloadAgentRequest{AgentId: info.ID, ReloadFromFile: true})
+	require.NoError(t, err)
+	require.NotNil(t, callbackAgent)
+
+	after, _, err := srv.getAgent(info.ID)
+	require.NoError(t, err)
+	assert.NotSame(t, before, after)
+	assert.Same(t, callbackAgent, after)
+	assert.Equal(t, config.Description, response.Metadata["description"])
+	assert.Equal(t, config.SystemPrompt, response.Config.SystemPrompt)
+	_, err = after.Chat(ctx, "callback-session", "Guess: red green blue yellow")
+	require.NoError(t, err)
+	system := llm.systemMessages()
+	require.NotEmpty(t, system)
+	assert.Contains(t, system[len(system)-1], config.SystemPrompt)
+
+	registry.SetReloadCallback(func(string, string, *loomv1.AgentConfig) error { return nil })
+	config.SystemPrompt = "Rules that were not applied."
+	require.NoError(t, agent.SaveAgentConfig(config, filepath.Join(tmpDir, "agents", config.Name+".yaml")))
+	_, err = srv.ReloadAgent(ctx, &loomv1.ReloadAgentRequest{AgentId: info.ID, ReloadFromFile: true})
+	require.Error(t, err)
+	assert.Equal(t, codes.Internal, status.Code(err))
+	unchanged, _, getErr := srv.getAgent(info.ID)
+	require.NoError(t, getErr)
+	assert.Same(t, after, unchanged)
+
+	registry.SetReloadCallback(nil)
+	_, err = srv.ReloadAgent(ctx, &loomv1.ReloadAgentRequest{AgentId: info.ID, ReloadFromFile: true})
+	require.Error(t, err)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+	unchanged, _, getErr = srv.getAgent(info.ID)
+	require.NoError(t, getErr)
+	assert.Same(t, after, unchanged)
+}
+
+func TestAgentLifecycle_ReloadFromFilePrefersRegistryRuntime(t *testing.T) {
+	tmpDir := t.TempDir()
+	registry, err := agent.NewRegistry(agent.RegistryConfig{
+		ConfigDir:   tmpDir,
+		DBPath:      filepath.Join(tmpDir, "registry.db"),
+		LLMProvider: &systemPromptRecordingLLM{},
+		Logger:      zaptest.NewLogger(t),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, registry.Close()) })
+
+	srv := newTestMultiAgentServer(t)
+	srv.SetAgentRegistry(registry)
+	ctx := context.Background()
+	config := &loomv1.AgentConfig{Name: "registry-agent", SystemPrompt: "Before reload."}
+	created, err := srv.CreateAgentFromConfig(ctx, &loomv1.CreateAgentRequest{Config: config})
+	require.NoError(t, err)
+
+	callbackCalled := false
+	registry.SetReloadCallback(func(string, string, *loomv1.AgentConfig) error {
+		callbackCalled = true
+		return nil
+	})
+	config.SystemPrompt = "After reload."
+	require.NoError(t, agent.SaveAgentConfig(config, filepath.Join(tmpDir, "agents", config.Name+".yaml")))
+	_, err = srv.ReloadAgent(ctx, &loomv1.ReloadAgentRequest{AgentId: created.Id, ReloadFromFile: true})
+	require.NoError(t, err)
+	assert.False(t, callbackCalled)
+
+	runtime, _, err := srv.getAgent(created.Id)
+	require.NoError(t, err)
+	registered, err := registry.GetAgent(ctx, created.Id)
+	require.NoError(t, err)
+	assert.Same(t, registered, runtime)
+	assert.Equal(t, config.SystemPrompt, runtime.GetConfig().SystemPrompt)
+}
+
 func TestAgentLifecycle_CreateAgentFromConfig_DuplicateNames(t *testing.T) {
 	srv := newTestMultiAgentServer(t)
 	ctx := context.Background()
