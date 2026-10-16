@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Configurable span content length for OTLP export
+- **`observability.otlp_max_content_length`** sets how many runes of message, response and recall-query previews are recorded on spans while OTLP export is active (default 200, unchanged; `0` keeps content whole; negative values are rejected). The two private 200-rune truncation helpers in `pkg/agent` and `pkg/llm` are replaced by `observability.TruncateContent`. PII and credential redaction stay on and apply at any length. `looms serve` and `looms workflow` now build the OTLP tracer through one shared helper.
+
 #### OpenInference attributes on OTLP spans
 - **Exported spans carry the OpenInference attributes Arize Phoenix uses.** Every span gets `openinference.span.kind` from its name (`llm.completion` → `LLM`; `agent.chat*` and `agent.conversation.resume` → `AGENT`; `agent.tool_execution`, `tool.execute`, `mcp.tools.call` → `TOOL`; `graph_memory.recall`, `memory.search_messages` → `RETRIEVER`; `memory.rerank_search_results` → `RERANKER`; others → `CHAIN`), and `input.value` / `output.value` from the message and response previews. LLM spans add `llm.token_count.prompt` (uncached input plus cache reads and writes), `llm.token_count.completion`, `llm.token_count.total`, `llm.token_count.prompt_details.cache_read` / `cache_write` and `llm.cost.total`. Keys a span already sets win. `llm.provider`, `llm.system` and `llm.model_name` are left to the backend, which derives them from `gen_ai.*`. See `docs/architecture/otlp-integration.md`.
 
