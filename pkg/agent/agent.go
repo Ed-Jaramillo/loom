@@ -3519,10 +3519,11 @@ func (a *Agent) commitToolRow(ctx Context, session *Session, toolCall ToolCall, 
 	if a.enableGraphMemoryExtraction && toolCall.Name != "graph_memory" {
 		a.graphToolExecutionsSinceExtraction++
 		if a.graphToolExecutionsSinceExtraction >= a.graphExtractionCadence {
+			extractCtx := context.WithoutCancel(ctx)
 			a.graphExtractionWG.Add(1)
 			go func() {
 				defer a.graphExtractionWG.Done()
-				a.extractGraphMemoryAsync(ctx, session.ID)
+				a.extractGraphMemoryAsync(extractCtx, session.ID)
 			}()
 			a.graphToolExecutionsSinceExtraction = 0
 		}
