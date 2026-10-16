@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -267,7 +268,7 @@ func spanToEvalRun(span *Span, evalID string) *storage.EvalRun {
 	query, _ := span.Attributes["query"].(string)
 	model, _ := span.Attributes[AttrLLMModel].(string)
 	response, _ := span.Attributes["response"].(string)
-	sessionID, _ := span.Attributes[AttrSessionID].(string)
+	sessionID := evalRunSessionID(span)
 
 	// Success based on status
 	success := span.Status.Code != StatusError
@@ -301,6 +302,26 @@ func spanToEvalRun(span *Span, evalID string) *storage.EvalRun {
 		SessionID:         sessionID,
 		Timestamp:         span.StartTime.Unix(),
 	}
+}
+
+// evalRunSessionID returns the session boundary used by the legacy trace
+// analysis. Only request/agent turn spans delimit a session. Late child spans
+// keep session.id in configuration_json, but must not move the top-level
+// eval_runs.session_id boundary past the end of a turn.
+func evalRunSessionID(span *Span) string {
+	if span == nil {
+		return ""
+	}
+	switch span.Name {
+	case "server.Weave", "server.StreamWeave":
+		sessionID, _ := span.Attributes[AttrSessionID].(string)
+		return sessionID
+	}
+	if strings.HasPrefix(span.Name, "agent.chat") {
+		sessionID, _ := span.Attributes[AttrSessionID].(string)
+		return sessionID
+	}
+	return ""
 }
 
 // safeInt32FromInt64 converts an int64 to int32, capping at MaxInt32/MinInt32

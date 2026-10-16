@@ -35,6 +35,9 @@ Add approval workflows to agents.
 
 ## Integration
 
+**[Arize Phoenix observability →](guides/integration/phoenix-observability/)**
+Export OTLP spans to Phoenix and follow the local verification and VM rollout gates.
+
 **[MCP Integration →](guides/integration/mcp-readme/)**
 Connect to Model Context Protocol servers.
 

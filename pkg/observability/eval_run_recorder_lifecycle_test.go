@@ -15,6 +15,7 @@ package observability
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -247,6 +248,46 @@ func TestSpanToEvalRun_TokenCount(t *testing.T) {
 			run := spanToEvalRun(&Span{SpanID: "s", Attributes: tt.attrs}, "eval")
 			if run.TokenCount != tt.want {
 				t.Fatalf("TokenCount = %d, want %d", run.TokenCount, tt.want)
+			}
+		})
+	}
+}
+
+func TestSpanToEvalRun_SessionBoundaryOnlyOnTurnSpans(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "server.Weave", want: "session-1"},
+		{name: "server.StreamWeave", want: "session-1"},
+		{name: "agent.chat", want: "session-1"},
+		{name: "agent.chat.retry", want: "session-1"},
+		{name: "agent.conversation.resume"},
+		{name: SpanLLMCompletion},
+		{name: "graph_memory.recall"},
+		{name: "graph_memory.extract"},
+		{name: "memory.release_pressure"},
+		{name: "graph_memory.salience_boost"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := spanToEvalRun(&Span{
+				SpanID: "span-1",
+				Name:   tt.name,
+				Attributes: map[string]interface{}{
+					AttrSessionID: "session-1",
+				},
+			}, "eval-1")
+			if run.SessionID != tt.want {
+				t.Fatalf("SessionID = %q, want %q", run.SessionID, tt.want)
+			}
+
+			var config map[string]interface{}
+			if err := json.Unmarshal([]byte(run.ConfigurationJSON), &config); err != nil {
+				t.Fatalf("ConfigurationJSON: %v", err)
+			}
+			if got := config[AttrSessionID]; got != "session-1" {
+				t.Fatalf("configuration_json %s = %v, want session-1", AttrSessionID, got)
 			}
 		})
 	}

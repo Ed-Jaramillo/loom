@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### Phoenix eval-run session boundaries
+- **Late memory and LLM spans no longer move the legacy trace-analysis session boundary.** `EvalRunRecorder` writes the top-level `eval_runs.session_id` only for `server.Weave`, `server.StreamWeave`, and `agent.chat*`; other spans retain `session.id` in `configuration_json` for inspection without changing row-order session ranges.
+
 #### OTLP export: trace identity and cache tokens
 - **`OTelTracer` spans carry the IDs the backend stores.** Loom spans received fresh UUIDs while the OTel SDK assigned its own trace and span IDs, so `TraceIDFromContext` never matched the exported trace, and spans started after their parent ended (async memory extraction) were exported into a new trace under a parent that was never exported. `StartSpan` now adopts the SDK span context's IDs.
 - **Cache token attributes use the OTel names.** `llm.tokens.cache_read` / `cache_write` exported as `gen_ai.usage.cache_read_input_tokens` / `cache_creation_input_tokens`; the OTel GenAI keys are `gen_ai.usage.cache_read.input_tokens` / `gen_ai.usage.cache_creation.input_tokens`, so backends reading the spec names saw no cache tokens.

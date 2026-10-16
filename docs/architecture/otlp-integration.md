@@ -470,7 +470,7 @@ server.Weave                          (CHAIN)
 
 **`metadata`.** `agent.chat` and `agent.conversation.resume` carry one OpenInference `metadata` attribute, a JSON object with `graph_memory_enabled` and the tags of `observability.ContextWithSpanMetadata`.
 
-**`session.id` stays on `server.Weave` and `agent.chat`.** The memory spans join the session through their trace. The experiment analysis reads `eval_runs` rows, which carry no span name or parent, and assigns rows without a session to sessions by row order; `session.id` on spans that can end after the turn would move those boundaries.
+**The top-level `eval_runs.session_id` stays on `server.Weave`, `server.StreamWeave`, and `agent.chat*`.** Other spans may carry `session.id` in `configuration_json` and join the session through their trace, but `EvalRunRecorder` omits it from the boundary column. The experiment analysis reads rows without a span name or parent and assigns them to sessions by row order; a late extraction or pressure span in the boundary column would move those ranges past the end of the turn.
 
 ## Data Structures
 
