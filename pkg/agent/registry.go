@@ -585,30 +585,56 @@ func (r *Registry) CreateAgent(ctx context.Context, name string) (*Agent, error)
 	return agent, nil
 }
 
-func behaviorAgentConfig(config *loomv1.AgentConfig) *Config {
-	agentConfig := &Config{
-		MaxIterations:          int(config.Behavior.MaxIterations),
-		MaxToolExecutions:      int(config.Behavior.MaxToolExecutions),
-		MaxTurns:               int(config.Behavior.MaxTurns),
-		OutputTokenCBThreshold: int(config.Behavior.GetOutputTokenCbThreshold()),
-		EnableSelfHealing:      config.Metadata["_enable_self_healing"] != "false",
+// registryAgentConfig builds the runtime Config of a registry agent:
+// DefaultConfig (LLM retry, self-healing, iteration limit), the behavior
+// limits when the config has a behavior block, the agent's self-healing
+// switch and its skills config. WithConfig replaces the whole Config, so a
+// bare literal here would turn LLM retries off for every agent built with a
+// behavior block.
+func registryAgentConfig(config *loomv1.AgentConfig, skillsConfig *skills.SkillsConfig) *Config {
+	agentConfig := DefaultConfig()
+	if b := config.Behavior; b != nil {
+		if b.MaxIterations != 0 {
+			agentConfig.MaxIterations = int(b.MaxIterations)
+		}
+		if b.MaxToolExecutions != 0 {
+			agentConfig.MaxToolExecutions = int(b.MaxToolExecutions)
+		}
+		if b.MaxTurns != 0 {
+			agentConfig.MaxTurns = int(b.MaxTurns)
+		}
+		agentConfig.OutputTokenCBThreshold = int(b.GetOutputTokenCbThreshold())
+		if agentConfig.OutputTokenCBThreshold == 0 {
+			agentConfig.OutputTokenCBThreshold = 8
+		}
 	}
-	if agentConfig.MaxIterations == 0 {
-		agentConfig.MaxIterations = DefaultConfig().MaxIterations
-	}
-	if agentConfig.MaxToolExecutions == 0 {
-		agentConfig.MaxToolExecutions = 50
-	}
-	if agentConfig.MaxTurns == 0 {
-		agentConfig.MaxTurns = 25
-	}
-	if agentConfig.OutputTokenCBThreshold == 0 {
-		agentConfig.OutputTokenCBThreshold = 8
-	}
-	if sc := ExtractSkillsConfig(config.Metadata); sc != nil {
-		agentConfig.SkillsConfig = sc
-	}
+	agentConfig.EnableSelfHealing = config.Metadata["_enable_self_healing"] != "false"
+	agentConfig.SkillsConfig = skillsConfig
 	return agentConfig
+}
+
+// resolveSkillsConfig returns the agent's skills config: the YAML form
+// stashed in metadata, else the proto field when it is enabled, else nil.
+func (r *Registry) resolveSkillsConfig(config *loomv1.AgentConfig) *skills.SkillsConfig {
+	if sc := ExtractSkillsConfig(config.Metadata); sc != nil {
+		r.logger.Debug("skills config extracted from metadata",
+			zap.Bool("enabled", sc.Enabled),
+			zap.String("skills_dir", sc.SkillsDir),
+			zap.Int("max_concurrent", sc.MaxConcurrentSkills))
+		return sc
+	}
+	if config.Skills != nil && config.Skills.Enabled {
+		return &skills.SkillsConfig{
+			Enabled:              config.Skills.Enabled,
+			EnabledSkills:        config.Skills.EnabledSkills,
+			DisabledSkills:       config.Skills.DisabledSkills,
+			MinAutoConfidence:    float64(config.Skills.MinAutoConfidence),
+			MaxConcurrentSkills:  int(config.Skills.MaxConcurrentSkills),
+			SkillsDir:            config.Skills.SkillsDir,
+			ContextBudgetPercent: int(config.Skills.ContextBudgetPercent),
+		}
+	}
+	return nil
 }
 
 // buildAgent creates an agent instance from proto configuration
@@ -634,11 +660,11 @@ func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (
 	}
 
 	// WithConfig replaces the whole runtime Config, so apply field options after it.
-	var opts []Option
-	if config.Behavior != nil {
-		opts = append(opts, WithConfig(behaviorAgentConfig(config)))
+	skillsConfig := r.resolveSkillsConfig(config)
+	opts := []Option{
+		WithConfig(registryAgentConfig(config, skillsConfig)),
+		WithName(config.Name),
 	}
-	opts = append(opts, WithName(config.Name))
 
 	// Create role-specific LLM providers (graceful degradation: warn on error, fallback to main LLM)
 	if config.JudgeLlm != nil && config.JudgeLlm.Provider != "" {
@@ -748,26 +774,8 @@ func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (
 		opts = append(opts, WithTracer(r.tracer))
 	}
 
-	// Create skills orchestrator if configured.
-	// Check both proto field (gRPC API) and metadata (YAML config).
-	var skillsConfig *skills.SkillsConfig
-	if sc := ExtractSkillsConfig(config.Metadata); sc != nil {
-		skillsConfig = sc
-		r.logger.Debug("skills config extracted from metadata",
-			zap.Bool("enabled", sc.Enabled),
-			zap.String("skills_dir", sc.SkillsDir),
-			zap.Int("max_concurrent", sc.MaxConcurrentSkills))
-	} else if config.Skills != nil && config.Skills.Enabled {
-		skillsConfig = &skills.SkillsConfig{
-			Enabled:              config.Skills.Enabled,
-			EnabledSkills:        config.Skills.EnabledSkills,
-			DisabledSkills:       config.Skills.DisabledSkills,
-			MinAutoConfidence:    float64(config.Skills.MinAutoConfidence),
-			MaxConcurrentSkills:  int(config.Skills.MaxConcurrentSkills),
-			SkillsDir:            config.Skills.SkillsDir,
-			ContextBudgetPercent: int(config.Skills.ContextBudgetPercent),
-		}
-	}
+	// Create skills orchestrator if configured (metadata from YAML, or the
+	// proto field from the gRPC API; resolved above for the runtime Config).
 	if skillsConfig != nil && skillsConfig.Enabled {
 		opts = append(opts, r.BuildSkillsOptions(skillsConfig, classifierLLM, llmProvider, config.Name)...)
 	}

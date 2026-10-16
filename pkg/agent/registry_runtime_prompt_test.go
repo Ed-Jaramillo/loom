@@ -113,3 +113,50 @@ func TestBuildAgent_BehaviorStillApplied(t *testing.T) {
 	assert.InDelta(t, 0.9, cfg.PatternConfig.MinConfidence, 0.001)
 	assert.Equal(t, 2, cfg.PatternConfig.MaxPatternsPerTurn)
 }
+
+func TestBuildAgent_RuntimeConfigKeepsDefaults(t *testing.T) {
+	tests := []struct {
+		name     string
+		behavior *loomv1.BehaviorConfig
+	}{
+		{name: "behavior block", behavior: &loomv1.BehaviorConfig{MaxTurns: 3}},
+		{name: "no behavior block"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry, _ := createTestRegistry(t)
+			ag, err := registry.buildAgent(context.Background(), &loomv1.AgentConfig{
+				Name:     "defaults-agent",
+				Llm:      &loomv1.LLMConfig{},
+				Behavior: tt.behavior,
+				Metadata: map[string]string{
+					"_enable_self_healing": "false",
+					"_skills_config":       `{"Enabled":false,"DisabledSkills":["triage"]}`,
+				},
+			})
+			require.NoError(t, err)
+
+			cfg := ag.GetConfig()
+			assert.Equal(t, DefaultConfig().Retry, cfg.Retry, "LLM retry must keep its defaults")
+			assert.False(t, cfg.EnableSelfHealing, "_enable_self_healing must apply with or without a behavior block")
+			require.NotNil(t, cfg.SkillsConfig, "the skills config must reach the runtime config")
+			assert.Equal(t, []string{"triage"}, cfg.SkillsConfig.DisabledSkills)
+		})
+	}
+}
+
+func TestBuildAgent_ProtoSkillsConfigReachesRuntime(t *testing.T) {
+	registry, _ := createTestRegistry(t)
+	cfgProto := &loomv1.AgentConfig{
+		Name:   "proto-skills-agent",
+		Llm:    &loomv1.LLMConfig{},
+		Skills: &loomv1.SkillsConfig{Enabled: true, DisabledSkills: []string{"triage"}, SkillsDir: t.TempDir()},
+	}
+	ag, err := registry.buildAgent(context.Background(), cfgProto)
+	require.NoError(t, err)
+
+	cfg := ag.GetConfig()
+	require.NotNil(t, cfg.SkillsConfig)
+	assert.True(t, cfg.SkillsConfig.Enabled)
+	assert.Equal(t, []string{"triage"}, cfg.SkillsConfig.DisabledSkills)
+}
