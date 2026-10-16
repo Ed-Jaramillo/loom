@@ -2017,7 +2017,7 @@ func runServe(cmd *cobra.Command, args []string) {
 
 				// Wrap LLM provider with instrumentation for observability
 				if tracer != nil {
-					agentLLMProvider = llm.NewInstrumentedProvider(agentLLMProvider, tracer)
+					agentLLMProvider = llm.NewInstrumentedProvider(agentLLMProvider, tracer, llm.WithRole(llm.RoleAgent))
 				}
 
 				// Wire per-role LLMs if declared in YAML. These route auxiliary
@@ -2034,7 +2034,7 @@ func runServe(cmd *cobra.Command, args []string) {
 							zap.String("model", cfg.CompressorLlm.Model))
 					} else {
 						if tracer != nil {
-							compLLM = llm.NewInstrumentedProvider(compLLM, tracer)
+							compLLM = llm.NewInstrumentedProvider(compLLM, tracer, llm.WithRole(llm.RoleCompressor))
 						}
 						agentOpts = append(agentOpts, agent.WithCompressorLLM(compLLM))
 						logger.Info("    Compressor LLM configured",
@@ -2051,7 +2051,7 @@ func runServe(cmd *cobra.Command, args []string) {
 							zap.String("model", cfg.ClassifierLlm.Model))
 					} else {
 						if tracer != nil {
-							classLLM = llm.NewInstrumentedProvider(classLLM, tracer)
+							classLLM = llm.NewInstrumentedProvider(classLLM, tracer, llm.WithRole(llm.RoleClassifier))
 						}
 						staticClassifierLLM = classLLM
 						agentOpts = append(agentOpts, agent.WithClassifierLLM(classLLM))
@@ -3328,7 +3328,7 @@ func runServe(cmd *cobra.Command, args []string) {
 
 			// Wrap LLM provider with instrumentation for observability
 			if tracer != nil {
-				llmProvider = llm.NewInstrumentedProvider(llmProvider, tracer)
+				llmProvider = llm.NewInstrumentedProvider(llmProvider, tracer, llm.WithRole(llm.RoleAgent))
 			}
 
 			// Create new agent
