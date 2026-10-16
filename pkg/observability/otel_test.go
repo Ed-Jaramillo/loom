@@ -82,6 +82,22 @@ func TestBuildOTelSpanContext(t *testing.T) {
 			t.Error("same input should produce same SpanID")
 		}
 	})
+
+	t.Run("OTel hex IDs round-trip unchanged", func(t *testing.T) {
+		traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+		spanID := "00f067aa0ba902b7"
+
+		sc, ok := buildOTelSpanContext(traceID, spanID)
+		if !ok {
+			t.Fatal("expected valid span context for hex IDs")
+		}
+		if got := sc.TraceID().String(); got != traceID {
+			t.Errorf("TraceID = %s, want %s", got, traceID)
+		}
+		if got := sc.SpanID().String(); got != spanID {
+			t.Errorf("SpanID = %s, want %s", got, spanID)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +609,74 @@ func TestOTelTracerExportsParentChildLinkage(t *testing.T) {
 	}
 	if childSpan.Parent.SpanID() != parentSpan.SpanContext.SpanID() {
 		t.Fatalf("child parent ID %s does not match parent span ID %s", childSpan.Parent.SpanID(), parentSpan.SpanContext.SpanID())
+	}
+}
+
+// TestStartSpan_SyncsLoomAndOTelIDs verifies that the Loom span carries the
+// exported OTel IDs, so TraceIDFromContext names the trace the backend stores.
+func TestStartSpan_SyncsLoomAndOTelIDs(t *testing.T) {
+	tr, exp := newInMemoryOTelTracer(t)
+
+	ctx, root := tr.StartSpan(context.Background(), "server.Weave")
+	childCtx, child := tr.StartSpan(ctx, "agent.chat")
+	if got := TraceIDFromContext(ctx); got != root.TraceID {
+		t.Errorf("TraceIDFromContext(root ctx) = %s, want %s", got, root.TraceID)
+	}
+	if got := TraceIDFromContext(childCtx); got != root.TraceID {
+		t.Errorf("TraceIDFromContext(child ctx) = %s, want root trace %s", got, root.TraceID)
+	}
+	tr.EndSpan(child)
+	tr.EndSpan(root)
+
+	byName := make(map[string]tracetest.SpanStub)
+	for _, s := range exp.GetSpans() {
+		byName[s.Name] = s
+	}
+	for _, loomSpan := range []*Span{root, child} {
+		stub, ok := byName[loomSpan.Name]
+		if !ok {
+			t.Fatalf("%s not exported", loomSpan.Name)
+		}
+		if got := stub.SpanContext.TraceID().String(); got != loomSpan.TraceID {
+			t.Errorf("%s: exported trace ID %s, Loom trace ID %s", loomSpan.Name, got, loomSpan.TraceID)
+		}
+		if got := stub.SpanContext.SpanID().String(); got != loomSpan.SpanID {
+			t.Errorf("%s: exported span ID %s, Loom span ID %s", loomSpan.Name, got, loomSpan.SpanID)
+		}
+	}
+	if child.ParentID != root.SpanID {
+		t.Errorf("child.ParentID = %s, want %s", child.ParentID, root.SpanID)
+	}
+}
+
+// TestStartSpan_LateChildAfterParentEndSharesTraceID covers spans started
+// after their parent ended (asynchronous memory extraction): the parent is no
+// longer active, so linkage goes through buildOTelSpanContext and must land on
+// the parent's exported trace and span IDs rather than a new trace.
+func TestStartSpan_LateChildAfterParentEndSharesTraceID(t *testing.T) {
+	tr, exp := newInMemoryOTelTracer(t)
+
+	parentCtx, parent := tr.StartSpan(context.Background(), "agent.chat")
+	tr.EndSpan(parent)
+
+	_, late := tr.StartSpan(parentCtx, "graph_memory.extract")
+	tr.EndSpan(late)
+
+	byName := make(map[string]tracetest.SpanStub)
+	for _, s := range exp.GetSpans() {
+		byName[s.Name] = s
+	}
+	parentStub, lateStub := byName["agent.chat"], byName["graph_memory.extract"]
+	if lateStub.SpanContext.TraceID() != parentStub.SpanContext.TraceID() {
+		t.Errorf("late child trace %s, parent trace %s: child was split into a new trace",
+			lateStub.SpanContext.TraceID(), parentStub.SpanContext.TraceID())
+	}
+	if lateStub.Parent.SpanID() != parentStub.SpanContext.SpanID() {
+		t.Errorf("late child parent %s, want exported parent span %s",
+			lateStub.Parent.SpanID(), parentStub.SpanContext.SpanID())
+	}
+	if !lateStub.Parent.IsRemote() {
+		t.Error("late child should link through the synthetic (remote) parent context")
 	}
 }
 
