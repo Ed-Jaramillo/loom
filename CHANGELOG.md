@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### Serve reload and resumed turns trace correctly
+- **The `looms serve` agent-file reload callback no longer rewraps the shared LLM provider.** It assigned the agent-role `InstrumentedProvider` back to the variable every later reload and every later use of the base provider read, so the first reload changed the role and wrapping of everything built after it. The wrapper is now reload-local.
+- **Resumed turns nest like normal turns.** `agent.conversation.resume` records `session.turn` (the parked turn's index, as `agent.chat` does), and the tool executions of the resumed batch are children of `agent.resume_batch` instead of siblings of it.
+
 #### OTLP export: trace identity and cache tokens
 - **`OTelTracer` spans carry the IDs the backend stores.** Loom spans received fresh UUIDs while the OTel SDK assigned its own trace and span IDs, so `TraceIDFromContext` never matched the exported trace, and spans started after their parent ended (async memory extraction) were exported into a new trace under a parent that was never exported. `StartSpan` now adopts the SDK span context's IDs.
 - **Cache token attributes use the OTel names.** `llm.tokens.cache_read` / `cache_write` exported as `gen_ai.usage.cache_read_input_tokens` / `cache_creation_input_tokens`; the OTel GenAI keys are `gen_ai.usage.cache_read.input_tokens` / `gen_ai.usage.cache_creation.input_tokens`, so backends reading the spec names saw no cache tokens.
