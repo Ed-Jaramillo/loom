@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +132,8 @@ type MultiAgentServer struct {
 	// Workflow sub-agent tracking for event-driven message notifications
 	workflowSubAgents   map[string]*workflowSubAgentContext // "coordinatorSessionID:agentID" → context
 	workflowSubAgentsMu sync.RWMutex
+	// undeliverableMessageGrace overrides defaultUndeliverableMessageGrace when > 0.
+	undeliverableMessageGrace time.Duration
 
 	// backgroundWorkerWG tracks every detached background goroutine that logs
 	// through s.logger: the queue monitor, workflow coordinator/sub-agent
@@ -185,7 +188,11 @@ type MultiAgentServer struct {
 
 // workflowSubAgentContext tracks a running workflow sub-agent for message notifications
 type workflowSubAgentContext struct {
-	agent               *agent.Agent
+	agent *agent.Agent
+	// agentID is the queue key this context consumes (the coordinator's ID,
+	// or the sub-agent's workflow-qualified ID). The queue monitor notifies a
+	// context only for messages addressed to exactly this ID.
+	agentID             string
 	sessionID           string
 	workflowID          string
 	notifyChan          chan struct{} // Channel to signal new messages
@@ -1820,6 +1827,7 @@ func (s *MultiAgentServer) spawnWorkflowSubAgents(ctx context.Context, coordinat
 	s.workflowSubAgentsMu.Lock()
 	s.workflowSubAgents[coordinatorKey] = &workflowSubAgentContext{
 		agent:       coordinatorAgent,
+		agentID:     coordinatorID,
 		sessionID:   sessionID,
 		workflowID:  workflowName,
 		notifyChan:  coordinatorNotifyChan,
@@ -1963,6 +1971,7 @@ func (s *MultiAgentServer) spawnWorkflowSubAgents(ctx context.Context, coordinat
 		}
 		s.workflowSubAgents[subAgentKey] = &workflowSubAgentContext{
 			agent:       subAgent,
+			agentID:     subAgentID,
 			sessionID:   subAgentSessionID,
 			workflowID:  workflowName,
 			notifyChan:  notifyChan,
@@ -2505,6 +2514,69 @@ func (s *MultiAgentServer) cancelBackgroundWorkers() {
 	s.spawnedAgentsMu.Unlock()
 }
 
+// defaultUndeliverableMessageGrace is how long a pending message may wait for a
+// listener before the queue monitor marks it failed. It covers a workflow
+// sub-agent that is still being spawned when its first message arrives.
+const defaultUndeliverableMessageGrace = 2 * time.Minute
+
+// dispatchPendingMessages is one tick of the queue monitor. For each agent ID
+// with pending messages it notifies the workflow contexts registered for
+// exactly that ID. Without one, it leaves the message to a listener registered
+// directly on the queue, or auto-spawns a workflow sub-agent for a
+// workflow-qualified ID ("workflow:role"). A message that still has no listener
+// after the grace period is marked failed with a warning instead of waking
+// unrelated workers every second for its whole TTL (BUG-5).
+func (s *MultiAgentServer) dispatchPendingMessages(ctx context.Context, now time.Time) {
+	grace := s.undeliverableMessageGrace
+	if grace <= 0 {
+		grace = defaultUndeliverableMessageGrace
+	}
+	for _, agentID := range s.messageQueue.GetAgentsWithPendingMessages(ctx) {
+		var matching []*workflowSubAgentContext
+		var nameMatches []string // workers whose workflow-qualified ID ends with ":" + agentID
+		s.workflowSubAgentsMu.RLock()
+		for _, wctx := range s.workflowSubAgents {
+			switch {
+			case wctx.agentID == agentID:
+				matching = append(matching, wctx)
+			case strings.HasSuffix(wctx.agentID, ":"+agentID):
+				nameMatches = append(nameMatches, wctx.agentID)
+			}
+		}
+		s.workflowSubAgentsMu.RUnlock()
+
+		if len(matching) > 0 {
+			// Different coordinator sessions may run the same sub-agent.
+			for _, wctx := range matching {
+				select {
+				case wctx.notifyChan <- struct{}{}:
+				default: // a notification is already pending
+				}
+			}
+			continue
+		}
+		if _, ok := s.messageQueue.GetNotificationChannel(agentID); ok {
+			continue // a listener registered on the queue is notified by Enqueue
+		}
+		reason := "no listener for this agent ID"
+		if strings.Contains(agentID, ":") {
+			err := s.autoSpawnWorkflowSubAgent(ctx, agentID)
+			if err == nil {
+				continue
+			}
+			s.logger.Warn("Failed to auto-spawn workflow sub-agent",
+				zap.String("agent", agentID),
+				zap.Error(err))
+			reason = "no listener and auto-spawn failed: " + err.Error()
+		}
+		if len(nameMatches) > 0 {
+			sort.Strings(nameMatches)
+			reason += "; addressed to a short name while the listener is registered as " + strings.Join(nameMatches, ", ")
+		}
+		s.messageQueue.FailUndeliverable(ctx, agentID, now.Add(-grace), reason)
+	}
+}
+
 // StartMessageQueueMonitor starts a background goroutine that monitors the message queue
 // and notifies workflow sub-agents when they have pending messages (event-driven, not polling).
 func (s *MultiAgentServer) StartMessageQueueMonitor(ctx context.Context) {
@@ -2561,45 +2633,7 @@ func (s *MultiAgentServer) StartMessageQueueMonitor(ctx context.Context) {
 				s.logger.Info("Message queue monitor stopped - cleaning up workflow agents")
 				return
 			case <-ticker.C:
-				// Get agents with pending messages
-				agentsWithMessages := s.messageQueue.GetAgentsWithPendingMessages(ctx)
-
-				for _, agentID := range agentsWithMessages {
-					// Check if this is a workflow sub-agent we're tracking
-					// Since we now use composite keys (coordinatorSessionID:agentID), we need to find matching entries
-					s.workflowSubAgentsMu.RLock()
-					var matchingContexts []*workflowSubAgentContext
-					for key, ctx := range s.workflowSubAgents {
-						// Check if the key ends with ":agentID"
-						if len(key) > len(agentID)+1 && key[len(key)-len(agentID)-1:] == ":"+agentID {
-							matchingContexts = append(matchingContexts, ctx)
-						}
-					}
-					s.workflowSubAgentsMu.RUnlock()
-
-					if len(matchingContexts) > 0 {
-						// Notify all matching sub-agents (different sessions may have same sub-agent)
-						for _, subAgentCtx := range matchingContexts {
-							select {
-							case subAgentCtx.notifyChan <- struct{}{}:
-								// Notified workflow agent
-							default:
-								// Channel full, agent already has pending notification
-							}
-						}
-					} else {
-						// WORKFLOW AUTO-SPAWN: Check if this is a workflow sub-agent that needs spawning
-						// Format: "workflow-name:agent-id" (contains colon)
-						if strings.Contains(agentID, ":") {
-							// Try to spawn this workflow sub-agent
-							if err := s.autoSpawnWorkflowSubAgent(ctx, agentID); err != nil {
-								s.logger.Warn("Failed to auto-spawn workflow sub-agent",
-									zap.String("agent", agentID),
-									zap.Error(err))
-							}
-						}
-					}
-				}
+				s.dispatchPendingMessages(ctx, time.Now())
 			}
 		}
 	})
@@ -2690,6 +2724,7 @@ func (s *MultiAgentServer) autoSpawnWorkflowSubAgent(ctx context.Context, agentI
 	}
 	s.workflowSubAgents[subAgentKey] = &workflowSubAgentContext{
 		agent:       subAgent,
+		agentID:     agentID,
 		sessionID:   subAgentSessionID,
 		workflowID:  workflowName,
 		notifyChan:  notifyChan,
@@ -2724,14 +2759,18 @@ func (s *MultiAgentServer) runWorkflowSubAgent(ctx context.Context, ag *agent.Ag
 		zap.String("session", sessionID))
 
 	defer func() {
-		// Deregister sub-agent when stopping (use composite key)
+		// Deregister sub-agent when stopping (use composite key). A worker that
+		// was replaced under the same key is cancelled before the replacement
+		// starts and reaches this point after it registered, so remove the
+		// entry and the queue channel only while they are still this worker's.
 		s.workflowSubAgentsMu.Lock()
-		delete(s.workflowSubAgents, subAgentKey)
+		if current, ok := s.workflowSubAgents[subAgentKey]; ok && current.notifyChan == notifyChan {
+			delete(s.workflowSubAgents, subAgentKey)
+		}
 		s.workflowSubAgentsMu.Unlock()
 
-		// Unregister from message queue (use agent ID, not composite key)
 		if s.messageQueue != nil {
-			s.messageQueue.UnregisterNotificationChannel(agentID)
+			s.messageQueue.UnregisterNotificationChannelIf(agentID, notifyChan)
 		}
 
 		s.logger.Info("Workflow sub-agent stopped",
