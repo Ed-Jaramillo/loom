@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	loomv1 "github.com/teradata-labs/loom/gen/go/loom/v1"
@@ -248,6 +249,9 @@ type Agent struct {
 	graphMemoryStore  memory.GraphMemoryStore
 	graphMemoryConfig *loomv1.GraphMemoryConfig
 	embedder          memory.Embedder // vector embeddings for semantic search (optional)
+	// vectorRecallUnsupported is set once the store reports it cannot run
+	// VectorRecall, so recall stops embedding queries it cannot use.
+	vectorRecallUnsupported atomic.Bool
 
 	// Task decomposition and kanban (optional).
 	taskManager     *task.Manager

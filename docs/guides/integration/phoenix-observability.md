@@ -156,7 +156,7 @@ The memory spans carry their results as attributes:
 
 | Span | Attributes |
 |---|---|
-| `graph_memory.recall` (RETRIEVER) | `loom.recall.outcome` (`injected`, `no_candidates`, `rerank_none`, ...), `loom.recall.selected_ids`, `loom.recall.injected_tokens`; the query as `input.value` and the injected block as `output.value` when memories were injected |
+| `graph_memory.recall` (RETRIEVER) | `loom.recall.outcome` (`injected`, `fallback_injected` for the session-start fallback, `no_candidates`, `rerank_none`, `vector_error`, ...), `loom.recall.selected_ids`, `loom.recall.injected_tokens`, `loom.recall.vector_candidates` when the agent has an embedder; the query as `input.value` and the injected block as `output.value` when memories were injected |
 | `graph_memory.extract` | `loom.extract.outcome` (`completed`, `no_messages`, `llm_error`, `parse_error`, `store_error`), `loom.extract.entities_created`, `loom.extract.relationships_created`, `loom.extract.memories_created` |
 | `memory.release_pressure` | start and end tokens, marks, and the evict / fold / offload operations |
 | `llm.completion` | `loom.llm.role`: `agent` for the agent's own calls; `memory_query`, `memory_rerank`, `memory_extract`, `memory_compress`, `memory_search_rerank`, `skills_router` for Loom's own calls; `judge` |

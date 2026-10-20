@@ -885,7 +885,7 @@ func (m *Manager) rememberTaskCompletion(ctx context.Context, t *Task) {
 		Content:       content,
 		Summary:       summary,
 		MemoryType:    "experience",
-		Source:        "task",
+		Source:        memory.SourceTask,
 		SourceID:      t.ID,
 		MemoryAgentID: t.AssigneeAgentID,
 		Tags:          tags,
