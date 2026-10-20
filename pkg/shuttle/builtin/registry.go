@@ -97,6 +97,10 @@ func Names() []string {
 		"agent_management",
 		"contact_human",
 		"manage_ephemeral_agents",
+		// ask_phoenix_assistant needs the server's Phoenix client and config;
+		// looms constructs it from sentinel.phoenix (see cmd/looms). Listed so
+		// YAML configs can declare it in tools.builtin.
+		"ask_phoenix_assistant",
 	}
 }
 

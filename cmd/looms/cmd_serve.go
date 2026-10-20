@@ -58,6 +58,7 @@ import (
 	"github.com/teradata-labs/loom/pkg/orchestration"
 	"github.com/teradata-labs/loom/pkg/prompts"
 	"github.com/teradata-labs/loom/pkg/scheduler"
+	"github.com/teradata-labs/loom/pkg/sentinel/assistant"
 	"github.com/teradata-labs/loom/pkg/server"
 	"github.com/teradata-labs/loom/pkg/shuttle"
 	"github.com/teradata-labs/loom/pkg/shuttle/builtin"
@@ -239,7 +240,17 @@ func registerYAMLBuiltinTools(
 		}
 
 		var tool shuttle.Tool
-		if toolName == "agent_management" && registry != nil {
+		if toolName == assistant.ToolName {
+			// Needs the server's Phoenix client; built from sentinel.phoenix.
+			// Nil (with the reason logged) when the tool is disabled or the
+			// API key env var is unset, so the YAML mention is not an error.
+			built, err := newPhoenixAssistantTool(config, logger)
+			if err != nil {
+				logger.Warn(indent+"  ask_phoenix_assistant not registered", zap.Error(err))
+				continue
+			}
+			tool = built
+		} else if toolName == "agent_management" && registry != nil {
 			hook := func(skillName, filePath string) {
 				reloaded, failed := registry.ReloadAllSkillRouters(context.Background())
 				logger.Info(agentManagementLogTag+": skill write triggered router reload",

@@ -120,3 +120,25 @@ mcp:
         PYTHONPATH: ./mcp_servers/python
       transport: stdio
       working_dir: ./mcp_servers/python
+
+# Sentinel: Phoenix access for the ask_phoenix_assistant tool (optional).
+# The tool is only registered for agents that list it in spec.tools and only
+# when assistant.enabled is true. The API key is read from the environment
+# variable named by api_key_env and is never written here.
+# See docs/guides/phoenix-assistant.md.
+# sentinel:
+#   phoenix:
+#     base_url: http://localhost:6006
+#     project: default
+#     api_key_env: PHOENIX_API_KEY
+#     request_timeout: 15s
+#     assistant:
+#       enabled: false
+#       model:
+#         provider_type: builtin        # builtin or custom (then set provider_id)
+#         provider: ANTHROPIC           # ANTHROPIC, OPENAI, AWS, GOOGLE, ...
+#         model_name: claude-sonnet-4-5-20250929
+#       approve_tools: []               # read-only PXI tools allowed when PXI asks for approval
+#       timeout: 120s
+#       max_approval_rounds: 4
+#       record_local_traces: true

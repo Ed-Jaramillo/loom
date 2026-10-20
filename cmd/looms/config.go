@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 	loomv1 "github.com/teradata-labs/loom/gen/go/loom/v1"
@@ -115,6 +116,10 @@ type Config struct {
 	// Per-agent metadata["patterns_dir"] overrides this; agents fall back to
 	// $LOOM_DATA_DIR/patterns when both are empty.
 	PatternsDir string `mapstructure:"patterns_dir"`
+
+	// Sentinel configures the trace-debugging meta-agent's Phoenix access
+	// (REST client and the ask_phoenix_assistant tool).
+	Sentinel SentinelConfig `mapstructure:"sentinel"`
 }
 
 // EmbeddingConfig configures the vector embedding provider for hybrid memory search.
@@ -838,6 +843,78 @@ type ToolPermissionsConfig struct {
 	TimeoutSeconds int `mapstructure:"timeout_seconds"`
 }
 
+// SentinelConfig holds Sentinel (trace-debugging meta-agent) settings.
+// Only the Phoenix access block is implemented; detectors and incidents are
+// planned.
+type SentinelConfig struct {
+	// Phoenix is the Go-side Phoenix REST access, shared by the
+	// ask_phoenix_assistant tool and future fixture export.
+	Phoenix SentinelPhoenixConfig `mapstructure:"phoenix"`
+}
+
+// SentinelPhoenixConfig configures the narrow Phoenix REST client.
+type SentinelPhoenixConfig struct {
+	// BaseURL is the Phoenix origin, e.g. "http://10.27.87.243:6006".
+	BaseURL string `mapstructure:"base_url"`
+
+	// Project is the default Phoenix project traces are looked up in.
+	Project string `mapstructure:"project"`
+
+	// APIKeyEnv names the environment variable holding the Phoenix API key.
+	// The key itself is never written to config. Default: PHOENIX_API_KEY.
+	APIKeyEnv string `mapstructure:"api_key_env"`
+
+	// RequestTimeout bounds one non-streaming request (e.g. "15s").
+	RequestTimeout string `mapstructure:"request_timeout"`
+
+	// MaxPages bounds how many pages a listing follows.
+	MaxPages int `mapstructure:"max_pages"`
+
+	// MaxResponseBytes bounds one response body.
+	MaxResponseBytes int64 `mapstructure:"max_response_bytes"`
+
+	// Assistant configures the ask_phoenix_assistant tool.
+	Assistant SentinelAssistantConfig `mapstructure:"assistant"`
+}
+
+// SentinelAssistantConfig configures ask_phoenix_assistant, which drives
+// Phoenix's assistant (PXI) headlessly through /v1/agent_sessions.
+type SentinelAssistantConfig struct {
+	// Enabled registers the tool for agents that list it in tools.builtin.
+	Enabled bool `mapstructure:"enabled"`
+
+	// Model is the model PXI runs on. Phoenix resolves the provider
+	// credentials on its side (Settings -> AI Providers).
+	Model SentinelAssistantModelConfig `mapstructure:"model"`
+
+	// ApproveTools lists PXI tool names allowed to run when PXI asks for
+	// approval. Everything else is denied. Keep it to read-only tools.
+	ApproveTools []string `mapstructure:"approve_tools"`
+
+	// Timeout bounds one tool call end to end (e.g. "120s").
+	Timeout string `mapstructure:"timeout"`
+
+	// MaxApprovalRounds bounds approval continuations per call.
+	MaxApprovalRounds int `mapstructure:"max_approval_rounds"`
+
+	// RecordLocalTraces asks Phoenix to record PXI's own turns as traces in
+	// its assistant project so PXI's model spend can be read back.
+	RecordLocalTraces bool `mapstructure:"record_local_traces"`
+}
+
+// SentinelAssistantModelConfig mirrors Phoenix's AgentModelSelection.
+type SentinelAssistantModelConfig struct {
+	// ProviderType is "builtin" or "custom".
+	ProviderType string `mapstructure:"provider_type"`
+	// Provider is a Phoenix ModelProvider enum value such as ANTHROPIC,
+	// OPENAI, AWS or GOOGLE (builtin only).
+	Provider string `mapstructure:"provider"`
+	// ProviderID is the stored custom provider record (custom only).
+	ProviderID string `mapstructure:"provider_id"`
+	// ModelName is the model identifier Phoenix passes to the provider.
+	ModelName string `mapstructure:"model_name"`
+}
+
 // WebSearchConfig holds web search API keys.
 type WebSearchConfig struct {
 	// BraveAPIKey for Brave Search API (from CLI/env/keyring only)
@@ -1277,6 +1354,20 @@ func setDefaults() {
 	// Default both false to preserve existing behavior.
 	viper.SetDefault("tools.minimal", false)
 	viper.SetDefault("tools.none", false)
+
+	// Sentinel defaults. Only Phoenix access is implemented; the tool is off
+	// until sentinel.phoenix.assistant.enabled is set.
+	viper.SetDefault("sentinel.phoenix.project", "default")
+	viper.SetDefault("sentinel.phoenix.api_key_env", "PHOENIX_API_KEY")
+	viper.SetDefault("sentinel.phoenix.request_timeout", "15s")
+	viper.SetDefault("sentinel.phoenix.max_pages", 20)
+	viper.SetDefault("sentinel.phoenix.max_response_bytes", 8<<20)
+	viper.SetDefault("sentinel.phoenix.assistant.enabled", false)
+	viper.SetDefault("sentinel.phoenix.assistant.model.provider_type", "builtin")
+	viper.SetDefault("sentinel.phoenix.assistant.model.provider", "ANTHROPIC")
+	viper.SetDefault("sentinel.phoenix.assistant.timeout", "120s")
+	viper.SetDefault("sentinel.phoenix.assistant.max_approval_rounds", 4)
+	viper.SetDefault("sentinel.phoenix.assistant.record_local_traces", true)
 	// Check LOOM_YOLO environment variable
 	if os.Getenv("LOOM_YOLO") == "true" || os.Getenv("LOOM_YOLO") == "1" {
 		viper.Set("tools.permissions.yolo", true)
@@ -1833,6 +1924,61 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.Sentinel.Validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Validate checks the Sentinel block. Phoenix fields are only required when
+// the assistant tool is enabled.
+func (s *SentinelConfig) Validate() error {
+	p := &s.Phoenix
+	if p.RequestTimeout != "" {
+		if _, err := time.ParseDuration(p.RequestTimeout); err != nil {
+			return fmt.Errorf("sentinel.phoenix.request_timeout: %w", err)
+		}
+	}
+	if p.MaxPages < 0 {
+		return fmt.Errorf("sentinel.phoenix.max_pages must be >= 0")
+	}
+	if p.MaxResponseBytes < 0 {
+		return fmt.Errorf("sentinel.phoenix.max_response_bytes must be >= 0")
+	}
+	a := &p.Assistant
+	if a.Timeout != "" {
+		if _, err := time.ParseDuration(a.Timeout); err != nil {
+			return fmt.Errorf("sentinel.phoenix.assistant.timeout: %w", err)
+		}
+	}
+	if a.MaxApprovalRounds < 0 {
+		return fmt.Errorf("sentinel.phoenix.assistant.max_approval_rounds must be >= 0")
+	}
+	if !a.Enabled {
+		return nil
+	}
+	if p.BaseURL == "" {
+		return fmt.Errorf("sentinel.phoenix.base_url is required when sentinel.phoenix.assistant.enabled is true")
+	}
+	if p.Project == "" {
+		return fmt.Errorf("sentinel.phoenix.project is required when sentinel.phoenix.assistant.enabled is true")
+	}
+	if p.APIKeyEnv == "" {
+		return fmt.Errorf("sentinel.phoenix.api_key_env is required when sentinel.phoenix.assistant.enabled is true")
+	}
+	switch a.Model.ProviderType {
+	case "builtin":
+		if a.Model.Provider == "" || a.Model.ModelName == "" {
+			return fmt.Errorf("sentinel.phoenix.assistant.model needs provider and model_name for provider_type builtin")
+		}
+	case "custom":
+		if a.Model.ProviderID == "" || a.Model.ModelName == "" {
+			return fmt.Errorf("sentinel.phoenix.assistant.model needs provider_id and model_name for provider_type custom")
+		}
+	default:
+		return fmt.Errorf("sentinel.phoenix.assistant.model.provider_type must be builtin or custom (got: %q)", a.Model.ProviderType)
+	}
 	return nil
 }
 
