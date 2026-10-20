@@ -585,6 +585,32 @@ func (r *Registry) CreateAgent(ctx context.Context, name string) (*Agent, error)
 	return agent, nil
 }
 
+func behaviorAgentConfig(config *loomv1.AgentConfig) *Config {
+	agentConfig := &Config{
+		MaxIterations:          int(config.Behavior.MaxIterations),
+		MaxToolExecutions:      int(config.Behavior.MaxToolExecutions),
+		MaxTurns:               int(config.Behavior.MaxTurns),
+		OutputTokenCBThreshold: int(config.Behavior.GetOutputTokenCbThreshold()),
+		EnableSelfHealing:      config.Metadata["_enable_self_healing"] != "false",
+	}
+	if agentConfig.MaxIterations == 0 {
+		agentConfig.MaxIterations = DefaultConfig().MaxIterations
+	}
+	if agentConfig.MaxToolExecutions == 0 {
+		agentConfig.MaxToolExecutions = 50
+	}
+	if agentConfig.MaxTurns == 0 {
+		agentConfig.MaxTurns = 25
+	}
+	if agentConfig.OutputTokenCBThreshold == 0 {
+		agentConfig.OutputTokenCBThreshold = 8
+	}
+	if sc := ExtractSkillsConfig(config.Metadata); sc != nil {
+		agentConfig.SkillsConfig = sc
+	}
+	return agentConfig
+}
+
 // buildAgent creates an agent instance from proto configuration
 func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (*Agent, error) {
 	// Create LLM provider from config.
@@ -607,10 +633,12 @@ func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (
 		llmProvider = llm.NewInstrumentedProvider(llmProvider, r.tracer)
 	}
 
-	// Build options from config
-	opts := []Option{
-		WithName(config.Name),
+	// WithConfig replaces the whole runtime Config, so apply field options after it.
+	var opts []Option
+	if config.Behavior != nil {
+		opts = append(opts, WithConfig(behaviorAgentConfig(config)))
 	}
+	opts = append(opts, WithName(config.Name))
 
 	// Create role-specific LLM providers (graceful degradation: warn on error, fallback to main LLM)
 	if config.JudgeLlm != nil && config.JudgeLlm.Provider != "" {
@@ -689,49 +717,30 @@ func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (
 		opts = append(opts, WithDescription(config.Description))
 	}
 
-	// Set behavior config (max_tool_executions, max_turns, output_token_cb_threshold) if provided
-	if config.Behavior != nil {
-		agentConfig := &Config{
-			Name:                   config.Name, // Preserve name from config
-			MaxToolExecutions:      int(config.Behavior.MaxToolExecutions),
-			MaxTurns:               int(config.Behavior.MaxTurns),
-			OutputTokenCBThreshold: int(config.Behavior.GetOutputTokenCbThreshold()),
-			EnableSelfHealing:      config.Metadata["_enable_self_healing"] != "false",
-		}
-		// Use defaults if not specified
-		if agentConfig.MaxToolExecutions == 0 {
-			agentConfig.MaxToolExecutions = 50
-		}
-		if agentConfig.MaxTurns == 0 {
-			agentConfig.MaxTurns = 25 // Default from config_loader.go:258
-		}
-		if agentConfig.OutputTokenCBThreshold == 0 {
-			agentConfig.OutputTokenCBThreshold = 8
-		}
-		// Extract skills config from metadata and attach to Go config
-		if sc := ExtractSkillsConfig(config.Metadata); sc != nil {
-			agentConfig.SkillsConfig = sc
-		}
-		opts = append(opts, WithConfig(agentConfig))
+	if config.Rom != "" {
+		opts = append(opts, WithROM(config.Rom))
+	}
+	if len(config.Metadata) > 0 {
+		opts = append(opts, WithMetadata(config.Metadata))
+	}
 
-		// Apply pattern config from YAML/proto if provided.
-		// Start from Go defaults, then overlay non-zero proto values. Bool fields
-		// are applied directly since the YAML parser already merged user values
-		// with sensible defaults before populating the proto message.
-		if config.Behavior.Patterns != nil {
-			pc := config.Behavior.Patterns
-			patternCfg := DefaultPatternConfig()
-			patternCfg.Enabled = pc.Enabled
-			patternCfg.EnableTracking = pc.EnableTracking
-			patternCfg.UseLLMClassifier = pc.UseLlmClassifier
-			if pc.MinConfidence > 0 {
-				patternCfg.MinConfidence = float64(pc.MinConfidence)
-			}
-			if pc.MaxPatternsPerTurn > 0 {
-				patternCfg.MaxPatternsPerTurn = int(pc.MaxPatternsPerTurn)
-			}
-			opts = append(opts, WithPatternConfig(patternCfg))
+	// Apply pattern config from YAML/proto if provided.
+	// Start from Go defaults, then overlay non-zero proto values. Bool fields
+	// are applied directly since the YAML parser already merged user values
+	// with sensible defaults before populating the proto message.
+	if config.Behavior != nil && config.Behavior.Patterns != nil {
+		pc := config.Behavior.Patterns
+		patternCfg := DefaultPatternConfig()
+		patternCfg.Enabled = pc.Enabled
+		patternCfg.EnableTracking = pc.EnableTracking
+		patternCfg.UseLLMClassifier = pc.UseLlmClassifier
+		if pc.MinConfidence > 0 {
+			patternCfg.MinConfidence = float64(pc.MinConfidence)
 		}
+		if pc.MaxPatternsPerTurn > 0 {
+			patternCfg.MaxPatternsPerTurn = int(pc.MaxPatternsPerTurn)
+		}
+		opts = append(opts, WithPatternConfig(patternCfg))
 	}
 
 	// Set tracer if provided
@@ -1791,10 +1800,19 @@ func (r *Registry) DeleteAgent(ctx context.Context, nameOrID string, force bool)
 	return nil
 }
 
+// OwnsRuntimeAgent reports whether the registry built the active agent instance.
+func (r *Registry) OwnsRuntimeAgent(ag *Agent) bool {
+	if ag == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.agents[ag.GetName()] == ag
+}
+
 // ReloadAgent hot-reloads an agent's configuration by name or GUID
 func (r *Registry) ReloadAgent(ctx context.Context, nameOrID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
 
 	// Try GUID lookup first
 	info, exists := r.agentInfo[nameOrID]
@@ -1802,16 +1820,23 @@ func (r *Registry) ReloadAgent(ctx context.Context, nameOrID string) error {
 		// Fall back to name lookup
 		agentID, nameExists := r.agentsByName[nameOrID]
 		if !nameExists {
+			r.mu.RUnlock()
 			return fmt.Errorf("agent not found: %s", nameOrID)
 		}
 		info, exists = r.agentInfo[agentID]
 		if !exists {
+			r.mu.RUnlock()
 			return fmt.Errorf("agent not found: %s", nameOrID)
 		}
 	}
+	name, id := info.Name, info.ID
+	wasRunning := info.Status == "running"
+	previousAgent := r.agents[name]
+	previousConfig := r.configs[name]
+	r.mu.RUnlock()
 
 	// Reload config from file
-	configPath := filepath.Join(r.configDir, "agents", info.Name+".yaml")
+	configPath := filepath.Join(r.configDir, "agents", name+".yaml")
 	config, err := LoadAgentConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
@@ -1820,22 +1845,40 @@ func (r *Registry) ReloadAgent(ctx context.Context, nameOrID string) error {
 	if err := ValidateAgentConfig(config); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
+	if config.Name != name {
+		return fmt.Errorf("reloaded config name %q differs from agent %q", config.Name, name)
+	}
 
-	r.configs[info.Name] = config
-	info.UpdatedAt = time.Now()
-
-	// If agent is running, rebuild it
-	if info.Status == "running" {
-		agent, err := r.buildAgent(ctx, config)
+	var replacement *Agent
+	if previousAgent != nil || wasRunning {
+		replacement, err = r.buildAgent(ctx, config)
 		if err != nil {
 			return fmt.Errorf("failed to rebuild agent: %w", err)
 		}
-		r.agents[info.Name] = agent
+		replacement.SetID(id)
 	}
 
+	r.mu.Lock()
+	current, exists := r.agentInfo[id]
+	if !exists || current.Name != name || r.agentsByName[name] != id ||
+		r.agents[name] != previousAgent || r.configs[name] != previousConfig {
+		r.mu.Unlock()
+		return fmt.Errorf("agent %q changed while reloading", name)
+	}
+	if current.Status == "running" && replacement == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("agent %q is running without a runtime instance", name)
+	}
+	r.configs[name] = config
+	current.UpdatedAt = time.Now()
+	if replacement != nil {
+		r.agents[name] = replacement
+	}
+	r.mu.Unlock()
+
 	r.logger.Info("Agent config reloaded",
-		zap.String("name", info.Name),
-		zap.String("id", info.ID))
+		zap.String("name", name),
+		zap.String("id", id))
 
 	return nil
 }
@@ -1846,6 +1889,13 @@ func (r *Registry) SetReloadCallback(cb ReloadCallback) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onReload = cb
+}
+
+// HasReloadCallback reports whether file reloads are handled by the host server.
+func (r *Registry) HasReloadCallback() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.onReload != nil
 }
 
 // SetSharedMemory sets the SharedMemoryStore for agents created by this registry.
@@ -1872,6 +1922,9 @@ func (r *Registry) ForceReload(ctx context.Context, name string) error {
 	// Validate config
 	if err := ValidateAgentConfig(config); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
+	}
+	if config.Name != name {
+		return fmt.Errorf("reloaded config name %q differs from agent %q", config.Name, name)
 	}
 
 	// Update registry's configs map

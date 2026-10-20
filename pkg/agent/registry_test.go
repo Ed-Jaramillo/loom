@@ -325,39 +325,67 @@ func TestRegistry_DeleteAgent_Running(t *testing.T) {
 }
 
 func TestRegistry_ReloadAgent(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		running       bool
+		removeRuntime bool
+	}{
+		{name: "stopped"},
+		{name: "running", running: true},
+		{name: "running without runtime instance", running: true, removeRuntime: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			registry, tmpDir := createTestRegistry(t)
+			ctx := context.Background()
+			config := createTestAgentConfig("reload")
+			configPath := filepath.Join(tmpDir, "agents", "reload.yaml")
+			require.NoError(t, SaveAgentConfig(config, configPath))
+			require.NoError(t, registry.LoadAgents(ctx))
+
+			before, err := registry.CreateAgent(ctx, config.Name)
+			require.NoError(t, err)
+			if tt.running {
+				require.NoError(t, registry.StartAgent(ctx, config.Name))
+			}
+			if tt.removeRuntime {
+				registry.RemoveAgentRuntime(config.Name)
+			}
+
+			config.Description = "Updated description"
+			config.SystemPrompt = "Follow the updated experiment protocol."
+			require.NoError(t, SaveAgentConfig(config, configPath))
+			require.NoError(t, registry.ReloadAgent(ctx, config.Name))
+
+			after, err := registry.GetAgent(ctx, config.Name)
+			require.NoError(t, err)
+			assert.NotSame(t, before, after)
+			assert.Equal(t, before.GetID(), after.GetID())
+			assert.Equal(t, config.Description, after.GetDescription())
+			assert.Equal(t, config.SystemPrompt, after.GetConfig().SystemPrompt)
+			assert.Equal(t, config.Description, registry.GetConfig(config.Name).Description)
+		})
+	}
+}
+
+func TestRegistry_ReloadAgentRejectsRenamedConfig(t *testing.T) {
 	registry, tmpDir := createTestRegistry(t)
 	ctx := context.Background()
-
-	// Setup agent
-	agentsDir := filepath.Join(tmpDir, "agents")
-	err := os.MkdirAll(agentsDir, 0755)
-	require.NoError(t, err)
-
 	config := createTestAgentConfig("reload")
-	configPath := filepath.Join(agentsDir, "reload.yaml")
-	err = SaveAgentConfig(config, configPath)
-	require.NoError(t, err)
+	configPath := filepath.Join(tmpDir, "agents", "reload.yaml")
+	require.NoError(t, SaveAgentConfig(config, configPath))
+	require.NoError(t, registry.LoadAgents(ctx))
 
-	err = registry.LoadAgents(ctx)
+	before, err := registry.CreateAgent(ctx, config.Name)
 	require.NoError(t, err)
-
-	_, err = registry.CreateAgent(ctx, "reload")
-	require.NoError(t, err)
-
-	// Modify config
-	config.Description = "Updated description"
-	err = SaveAgentConfig(config, configPath)
-	require.NoError(t, err)
-
-	// Reload agent
+	config.Name = "different-name"
+	require.NoError(t, SaveAgentConfig(config, configPath))
 	err = registry.ReloadAgent(ctx, "reload")
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "differs from agent")
 
-	// Verify config was reloaded
-	registry.mu.RLock()
-	reloadedConfig := registry.configs["reload"]
-	registry.mu.RUnlock()
-	assert.Equal(t, "Updated description", reloadedConfig.Description)
+	after, err := registry.GetAgent(ctx, "reload")
+	require.NoError(t, err)
+	assert.Same(t, before, after)
+	assert.Equal(t, "reload", registry.GetConfig("reload").Name)
 }
 
 func TestRegistry_ListAgents(t *testing.T) {

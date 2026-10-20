@@ -70,10 +70,10 @@ This document analyzes Loom's architecture against the **12-factor app methodolo
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        Loom Agent Framework                             │
 │                                                                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                 │
-│  │  CLI/TUI    │  │ gRPC Server  │  │ HTTP Gateway │                 │
-│  │ (looms/loom)│  │  Port 60051  │  │  Port 5006   │                 │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘                 │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐                 │
+│  │  CLI/TUI     │   │ gRPC Server  │   │ HTTP Gateway │                 │
+│  │ (looms/loom) │   │  Port 60051  │   │  Port 5006   │                 │
+│  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘                 │
 │         │                  │                  │                         │
 │         └──────────────────┼──────────────────┘                         │
 │                            │                                            │
@@ -84,10 +84,10 @@ This document analyzes Loom's architecture against the **12-factor app methodolo
 │                            │                                            │
 │         ┌──────────────────┼──────────────────┐                         │
 │         │                  │                  │                         │
-│    ┌────▼─────┐      ┌────▼─────┐      ┌────▼─────┐                   │
-│    │ Pattern  │      │  Memory  │      │ Backend  │                    │
-│    │ Registry │      │ Manager  │      │ Executor │                    │
-│    └────┬─────┘      └────┬─────┘      └────┬─────┘                   │
+│    ┌────▼─────┐       ┌────▼─────┐       ┌────▼─────┐                   │
+│    │ Pattern  │       │  Memory  │       │ Backend  │                   │
+│    │ Registry │       │ Manager  │       │ Executor │                   │
+│    └────┬─────┘       └────┬─────┘       └────┬─────┘                   │
 │         │                  │                  │                         │
 └─────────┼──────────────────┼──────────────────┼─────────────────────────┘
           │                  │                  │
@@ -102,7 +102,7 @@ This document analyzes Loom's architecture against the **12-factor app methodolo
           ▼                                     ▼
 ┌──────────────────┐              ┌──────────────────────────┐
 │  Configuration   │              │   Execution Backends     │
-│  ───────────────│              │  ──────────────────────  │
+│  ─────────────── │              │  ──────────────────────  │
 │  • Env Vars      │              │  • SQL (Teradata, PG)    │
 │  • Config Files  │              │  • REST APIs             │
 │  • Keyring       │              │  • Documents             │
@@ -114,30 +114,30 @@ This document analyzes Loom's architecture against the **12-factor app methodolo
 ├────────────────────────────────────────────────────────────┤
 │                                                            │
 │  LLM Providers (8):                                        │
-│  ┌────────────┐ ┌────────────┐ ┌────────────┐            │
-│  │ Anthropic  │ │   Bedrock  │ │   Ollama   │            │
-│  │  Claude    │ │   Claude   │ │ Local LLMs │            │
-│  └────────────┘ └────────────┘ └────────────┘            │
-│  ┌────────────┐ ┌────────────┐ ┌────────────┐            │
-│  │   Azure    │ │  Gemini    │ │  Mistral   │            │
-│  │   OpenAI   │ │   Flash    │ │   AI       │            │
-│  └────────────┘ └────────────┘ └────────────┘            │
-│  ┌────────────┐ ┌────────────┐                            │
-│  │   OpenAI   │ │ HuggingFace│                            │
-│  │  Official  │ │  Inference │                            │
-│  └────────────┘ └────────────┘                            │
+│    ┌────────────┐ ┌────────────┐ ┌────────────┐            │
+│    │ Anthropic  │ │   Bedrock  │ │   Ollama   │            │
+│    │  Claude    │ │   Claude   │ │ Local LLMs │            │
+│    └────────────┘ └────────────┘ └────────────┘            │
+│    ┌────────────┐ ┌────────────┐ ┌────────────┐            │
+│    │   Azure    │ │  Gemini    │ │  Mistral   │            │
+│    │   OpenAI   │ │   Flash    │ │   AI       │            │
+│    └────────────┘ └────────────┘ └────────────┘            │
+│   ┌────────────┐ ┌────────────┐                            │
+│   │   OpenAI   │ │ HuggingFace│                            │
+│   │  Official  │ │  Inference │                            │
+│   └────────────┘ └────────────┘                            │
 │                                                            │
 │  Observability (Optional):                                 │
-│  ┌────────────┐ ┌────────────┐                            │
-│  │    Hawk    │ │  Promptio  │                            │
-│  │  Tracer    │ │   Export   │                            │
-│  └────────────┘ └────────────┘                            │
+│   ┌────────────┐ ┌────────────┐                            │
+│   │    Hawk    │ │  Promptio  │                            │
+│   │  Tracer    │ │   Export   │                            │
+│   └────────────┘ └────────────┘                            │
 │                                                            │
 │  MCP Servers (Optional):                                   │
-│  ┌──────────────────────────────────┐                     │
-│  │  Model Context Protocol Servers  │                     │
-│  │  (External Tool Integration)     │                     │
-│  └──────────────────────────────────┘                     │
+│   ┌──────────────────────────────────┐                     │
+│   │  Model Context Protocol Servers  │                     │
+│   │  (External Tool Integration)     │                     │
+│   └──────────────────────────────────┘                     │
 └────────────────────────────────────────────────────────────┘
 ```
 
