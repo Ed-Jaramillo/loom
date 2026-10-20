@@ -31,6 +31,7 @@ import (
 	"github.com/teradata-labs/loom/pkg/llm/anthropic"
 	"github.com/teradata-labs/loom/pkg/llm/azureopenai"
 	"github.com/teradata-labs/loom/pkg/llm/bedrock"
+	"github.com/teradata-labs/loom/pkg/llm/factory"
 	"github.com/teradata-labs/loom/pkg/llm/gemini"
 	"github.com/teradata-labs/loom/pkg/llm/huggingface"
 	"github.com/teradata-labs/loom/pkg/llm/mistral"
@@ -985,6 +986,8 @@ type workflowInfo struct {
 func createLLMProvider() (agent.LLMProvider, string) {
 	// First check config file (preferred method)
 	if config.LLM.Provider != "" {
+		// Unset max_tokens resolves to the model's catalog output limit, as in serve.
+		maxTokens := factory.ResolveMaxOutput(config.LLM.MaxTokens, config.LLM.Provider, getDefaultModelForProvider(config))
 		switch config.LLM.Provider {
 		case "anthropic":
 			if config.LLM.AnthropicAPIKey != "" {
@@ -992,7 +995,7 @@ func createLLMProvider() (agent.LLMProvider, string) {
 					APIKey:      config.LLM.AnthropicAPIKey,
 					Model:       config.LLM.AnthropicModel,
 					Temperature: config.LLM.Temperature,
-					MaxTokens:   config.LLM.MaxTokens,
+					MaxTokens:   maxTokens,
 				})
 				return client, "Anthropic (config)"
 			}
@@ -1006,7 +1009,7 @@ func createLLMProvider() (agent.LLMProvider, string) {
 				SecretAccessKey: config.LLM.BedrockSecretAccessKey,
 				SessionToken:    config.LLM.BedrockSessionToken,
 				BearerToken:     config.LLM.BedrockBearerToken,
-				MaxTokens:       config.LLM.MaxTokens,
+				MaxTokens:       maxTokens,
 				Temperature:     config.LLM.Temperature,
 			})
 			if err == nil {
@@ -1017,7 +1020,7 @@ func createLLMProvider() (agent.LLMProvider, string) {
 			client := ollama.NewClient(ollama.Config{
 				Endpoint:    config.LLM.OllamaEndpoint,
 				Model:       config.LLM.OllamaModel,
-				MaxTokens:   config.LLM.MaxTokens,
+				MaxTokens:   maxTokens,
 				Temperature: config.LLM.Temperature,
 				Timeout:     time.Duration(config.LLM.Timeout) * time.Second,
 			})
@@ -1028,7 +1031,7 @@ func createLLMProvider() (agent.LLMProvider, string) {
 				client := openai.NewClient(openai.Config{
 					APIKey:      config.LLM.OpenAIAPIKey,
 					Model:       config.LLM.OpenAIModel,
-					MaxTokens:   config.LLM.MaxTokens,
+					MaxTokens:   maxTokens,
 					Temperature: config.LLM.Temperature,
 					Timeout:     time.Duration(config.LLM.Timeout) * time.Second,
 				})
@@ -1041,7 +1044,7 @@ func createLLMProvider() (agent.LLMProvider, string) {
 				DeploymentID: config.LLM.AzureOpenAIDeploymentID,
 				APIKey:       config.LLM.AzureOpenAIAPIKey,
 				EntraToken:   config.LLM.AzureOpenAIEntraToken,
-				MaxTokens:    config.LLM.MaxTokens,
+				MaxTokens:    maxTokens,
 				Temperature:  config.LLM.Temperature,
 				Timeout:      time.Duration(config.LLM.Timeout) * time.Second,
 			})
@@ -1054,7 +1057,7 @@ func createLLMProvider() (agent.LLMProvider, string) {
 				client := mistral.NewClient(mistral.Config{
 					APIKey:      config.LLM.MistralAPIKey,
 					Model:       config.LLM.MistralModel,
-					MaxTokens:   config.LLM.MaxTokens,
+					MaxTokens:   maxTokens,
 					Temperature: config.LLM.Temperature,
 					Timeout:     time.Duration(config.LLM.Timeout) * time.Second,
 				})
@@ -1066,7 +1069,7 @@ func createLLMProvider() (agent.LLMProvider, string) {
 				client := gemini.NewClient(gemini.Config{
 					APIKey:      config.LLM.GeminiAPIKey,
 					Model:       config.LLM.GeminiModel,
-					MaxTokens:   config.LLM.MaxTokens,
+					MaxTokens:   maxTokens,
 					Temperature: config.LLM.Temperature,
 					Timeout:     time.Duration(config.LLM.Timeout) * time.Second,
 				})
@@ -1078,7 +1081,7 @@ func createLLMProvider() (agent.LLMProvider, string) {
 				client := huggingface.NewClient(huggingface.Config{
 					Token:       config.LLM.HuggingFaceToken,
 					Model:       config.LLM.HuggingFaceModel,
-					MaxTokens:   config.LLM.MaxTokens,
+					MaxTokens:   maxTokens,
 					Temperature: config.LLM.Temperature,
 					Timeout:     time.Duration(config.LLM.Timeout) * time.Second,
 				})
