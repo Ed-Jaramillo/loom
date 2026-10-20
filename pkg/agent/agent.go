@@ -3957,6 +3957,28 @@ func (a *Agent) injectGraphMemoryContext(ctx context.Context, session *types.Ses
 		}
 	}
 
+	// Semantic recall: memories close in meaning to the query, whatever words
+	// they use. Runs when the agent has an embedder (embedding.enabled), the
+	// one extraction embeds new memories with.
+	vectorFailed := false
+	if a.embedder != nil && !a.vectorRecallUnsupported.Load() {
+		similar, vecErr := a.vectorRecall(ctx, searchQuery, seen)
+		if errors.Is(vecErr, memory.ErrVectorRecallUnsupported) {
+			// The store keeps no embeddings (PostgreSQL today): keyword
+			// recall only, for this and later turns.
+			a.vectorRecallUnsupported.Store(true)
+		} else {
+			if vecErr != nil {
+				vectorFailed = true
+				span.RecordError(fmt.Errorf("graph memory recall: vector recall: %w", vecErr))
+			}
+			span.SetAttribute("recall.embedding_model", a.embedder.Model())
+			span.SetAttribute("recall.vector_error", vectorFailed)
+			span.SetAttribute("recall.vector_candidates", len(similar))
+			candidates = append(candidates, similar...)
+		}
+	}
+
 	// Recorded even when candidates were found, so a partial store failure is
 	// visible instead of being hidden behind a successful injection.
 	span.SetAttribute("recall.store_error", storeFailed)
@@ -3964,28 +3986,156 @@ func (a *Agent) injectGraphMemoryContext(ctx context.Context, session *types.Ses
 	if len(candidates) > 0 {
 		span.SetAttribute("recall.candidate_ids", memoryIDs(candidates))
 	}
-	if len(candidates) == 0 {
-		if storeFailed {
-			// Distinct from no_candidates: the store failed, this is not a miss.
-			outcome = "store_error"
-		} else {
-			outcome = "no_candidates"
-		}
+	if len(candidates) == 0 && storeFailed {
+		// Distinct from no_candidates: the store failed, this is not a miss.
+		outcome = "store_error"
 		return
 	}
 
 	// LLM re-rank: ask the LLM which candidates are actually relevant.
-	relevant := a.rerankMemories(ctx, userMessage, candidates)
-	if len(relevant) == 0 {
-		outcome = "rerank_none"
+	var relevant []*memory.Memory
+	if len(candidates) > 0 {
+		relevant = a.rerankMemories(ctx, userMessage, candidates)
+	}
+	if len(relevant) > 0 {
+		a.injectRecalledMemories(ctx, span, session, relevant, relevantMemoriesHeader)
+		outcome = "injected"
 		return
 	}
-	span.SetAttribute("recall.injected", len(relevant))
-	span.SetAttribute("recall.selected_ids", memoryIDs(relevant))
+
+	// Nothing recalled for this message. At the start of a session, bring in
+	// what the agent knows about the user anyway: an opening message ("Hi")
+	// rarely names the topic the stored memories are about.
+	if isFirstTurn(session) {
+		background, fallbackErr := a.sessionStartMemories(ctx, budget)
+		if fallbackErr != nil {
+			span.RecordError(fmt.Errorf("graph memory recall: session-start fallback: %w", fallbackErr))
+		}
+		if len(background) > 0 {
+			span.SetAttribute("recall.fallback", "session_start")
+			a.injectRecalledMemories(ctx, span, session, background, sessionStartMemoriesHeader)
+			outcome = "fallback_injected"
+			return
+		}
+	}
+	switch {
+	case len(candidates) > 0:
+		outcome = "rerank_none"
+	case vectorFailed:
+		// The semantic search failed, so this is not an honest miss either.
+		outcome = "vector_error"
+	default:
+		outcome = "no_candidates"
+	}
+}
+
+// Headers of the injected graph-memory block.
+const (
+	relevantMemoriesHeader     = "Relevant memories from past conversations:"
+	sessionStartMemoriesHeader = "Memories from past conversations with this user, recalled at the start of the session (not selected for this message):"
+)
+
+// Semantic recall bounds: how many of the closest memories to take, and the
+// cosine similarity below which a memory is not treated as related. The
+// re-rank that follows makes the final choice.
+const (
+	vectorRecallLimit     = 20
+	vectorRecallThreshold = 0.3
+)
+
+// sessionStartFallbackLimit bounds the memories the session-start fallback
+// injects.
+const sessionStartFallbackLimit = 5
+
+// isFirstTurn reports whether session has no assistant message yet, so the
+// current turn is its first.
+func isFirstTurn(session *types.Session) bool {
+	for _, m := range session.GetMessages() {
+		if m.Role == "assistant" {
+			return false
+		}
+	}
+	return true
+}
+
+// vectorRecall embeds query and returns the agent's memories closest to it
+// that seen does not hold yet, marking them seen. Only memories embedded with
+// the agent's embedding model are compared, and memories below the salience
+// floor keyword recall applies are left out.
+func (a *Agent) vectorRecall(ctx context.Context, query string, seen map[string]bool) ([]*memory.Memory, error) {
+	vec, err := a.embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embedding the query: %w", err)
+	}
+	memories, err := a.graphMemoryStore.VectorRecall(ctx, memory.VectorRecallOpts{
+		AgentID:   a.config.Name,
+		Embedding: vec,
+		Model:     a.embedder.Model(),
+		Limit:     vectorRecallLimit,
+		Threshold: vectorRecallThreshold,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []*memory.Memory
+	for _, m := range memories {
+		if seen[m.ID] || m.Salience < memory.DefaultMinSalience {
+			continue
+		}
+		seen[m.ID] = true
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// sessionStartMemories returns the agent's highest-salience memories that
+// fit in budget tokens, for the first turn of a session when recall found
+// nothing for the message. They are not re-ranked against the message, which
+// at a session's start is often only a greeting. Task-completion memories
+// are left out: they record that a turn finished, not what the user wants,
+// and carry a fixed high salience that would put them first.
+func (a *Agent) sessionStartMemories(ctx context.Context, budget int) ([]*memory.Memory, error) {
+	memories, err := a.graphMemoryStore.Recall(ctx, memory.RecallOpts{
+		AgentID:        a.config.Name,
+		Limit:          sessionStartFallbackLimit,
+		MaxTokens:      budget,
+		ExcludeSources: []string{memory.SourceTask},
+	})
+	if err != nil {
+		return nil, err
+	}
+	tc := a.tokenCounter
+	if tc == nil {
+		tc = GetTokenCounter()
+	}
+	var out []*memory.Memory
+	used := 0
+	for _, m := range memories {
+		n := m.TokenCount
+		if n <= 0 {
+			n = tc.CountTokens(m.Content)
+		}
+		if used+n > budget {
+			break
+		}
+		used += n
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// injectRecalledMemories adds memories to the session as one graph-memory
+// system message under header, and records them on the recall span: count,
+// IDs, tokens, the block as output.value and each memory as an OpenInference
+// retrieval document.
+func (a *Agent) injectRecalledMemories(ctx context.Context, span *observability.Span, session *types.Session, memories []*memory.Memory, header string) {
+	span.SetAttribute("recall.injected", len(memories))
+	span.SetAttribute("recall.selected_ids", memoryIDs(memories))
 
 	var sb strings.Builder
-	sb.WriteString("Relevant memories from past conversations:\n\n")
-	for _, m := range relevant {
+	sb.WriteString(header)
+	sb.WriteString("\n\n")
+	for _, m := range memories {
 		sb.WriteString("- ")
 		if m.EventDate != "" {
 			// Surface the absolute date first so the answering LLM can order
@@ -4007,7 +4157,7 @@ func (a *Agent) injectGraphMemoryContext(ctx context.Context, session *types.Ses
 	span.SetAttribute("recall.injected_tokens", tc.CountTokens(injected))
 	span.SetAttribute("output.value", observability.TruncateContent(injected))
 	// OpenInference retriever documents, which Phoenix lists on the span.
-	for i, m := range relevant {
+	for i, m := range memories {
 		prefix := fmt.Sprintf("retrieval.documents.%d.document.", i)
 		span.SetAttribute(prefix+"id", m.ID)
 		span.SetAttribute(prefix+"content", observability.TruncateContent(m.Content))
@@ -4017,7 +4167,6 @@ func (a *Agent) injectGraphMemoryContext(ctx context.Context, session *types.Ses
 		Role:    "system",
 		Content: graphMemoryContextMarker + "\n" + injected,
 	})
-	outcome = "injected"
 }
 
 // memoryIDs returns the IDs of memories, in order.
