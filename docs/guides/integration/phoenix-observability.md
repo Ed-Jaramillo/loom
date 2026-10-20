@@ -26,6 +26,7 @@ Loom exports its traces to [Arize Phoenix](https://github.com/Arize-ai/phoenix) 
 - Nested spans: LLM and tool calls under the conversation loop; memory recall, extraction, context relief and salience boosts as their own spans; `llm.role` on every LLM call
 - Experiment tags from `WeaveRequest.context` on the server and agent spans
 - The embedded `eval_runs` record kept while exporting (`otlp_record_eval_runs`)
+- Each LLM call's messages, tool schemas and parameters, opt-in (`otlp_capture_llm_messages`)
 - Judge scores posted as Phoenix trace annotations (`phoenix_base_url`)
 
 📋 Planned:
@@ -72,7 +73,7 @@ The pip server also listens for OTLP/gRPC on TCP 4317 on every interface; `PHOEN
 looms serve --config examples\config\otlp-phoenix.yaml
 ```
 
-`otlp-phoenix.yaml` exports every span to the `loom-dev` project with 200-rune previews. For experiment runs use `otlp-phoenix-research.yaml` (see [Task 5](#task-5-run-an-experiment-with-the-research-preset)).
+`otlp-phoenix.yaml` exports every span to the `loom-dev` project with 200-rune previews. For experiment runs use `otlp-phoenix-research.yaml` (see [Task 6](#task-6-run-an-experiment-with-the-research-preset)).
 
 ### 3. Send a turn
 
@@ -162,13 +163,30 @@ The memory spans carry their results as attributes:
 
 Memory LLM cost is the sum of `llm.cost.total` over `llm.completion` spans whose `loom.llm.role` starts with `memory_`.
 
-### Task 5: Run an experiment with the research preset
+### Task 5: See exactly what the model received
+
+By default an `llm.completion` span shows a preview of the call's newest input. With
+
+```yaml
+observability:
+  otlp_capture_llm_messages: true
+```
+
+each LLM span also records the whole request, which Phoenix shows in the span's messages, tools and invocation parameters:
+- the system prompt, the history, injected memory blocks, tool calls with their arguments and tool results;
+- the tool schemas offered;
+- the model, max tokens, temperature and thinking (Bedrock, Anthropic and OpenAI-compatible providers);
+- the response.
+
+Each content follows `otlp_max_content_length`. A span keeps at most 256 KiB of messages and 64 KiB of tool schemas. When a long conversation is over that, the system prompt and the newest messages are kept, and a message with role `loom` says how many earlier ones were left out (also counted in `loom.llm.messages.omitted`). Redaction applies to all of it. Phoenix's database grows with every call's full prompt, so turn it on for research runs rather than by default, and check the span sizes on a small run first. The local `eval_runs` record does not keep these attributes.
+
+### Task 6: Run an experiment with the research preset
 
 ```powershell
 looms serve --config examples\config\otlp-phoenix-research.yaml
 ```
 
-Compared with `otlp-phoenix.yaml` it keeps previews up to 32768 runes, writes the embedded `eval_runs` record to `./observability.db` for the `trace_reports` analysis, posts judge scores to Phoenix, and uses the `loom-research` project. PII redaction stays on in the export; the local `eval_runs` record is not redacted.
+Compared with `otlp-phoenix.yaml` it keeps previews up to 32768 runes, records each LLM call's messages (Task 5), writes the embedded `eval_runs` record to `./observability.db` for the `trace_reports` analysis, posts judge scores to Phoenix, and uses the `loom-research` project. PII redaction stays on in the export; the local `eval_runs` record is not redacted.
 
 The `Weave` cost (`cost.totalCostUsd`) is the total of the turn's conversation calls. Builds before the trace-correlation change reported only the turn's last LLM call there, so do not compare cost figures across that change. Loom's memory calls are not in that total; use Task 4.
 

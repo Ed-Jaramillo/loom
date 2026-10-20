@@ -319,6 +319,9 @@ func deriveOpenInferenceAttrs(spanName string, attrs map[string]interface{}) []a
 }
 
 func isPassthrough(key string) bool {
+	if isOpenInferenceToolKey(key) {
+		return true
+	}
 	for _, p := range openInferencePassthrough {
 		if strings.HasSuffix(p, ".") {
 			if strings.HasPrefix(key, p) {
