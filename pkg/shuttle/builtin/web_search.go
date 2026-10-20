@@ -171,7 +171,7 @@ func (t *WebSearchTool) Readiness(_ context.Context) shuttle.ToolReadiness {
 	if len(configured) == 0 {
 		return shuttle.ToolReadiness{
 			State:   shuttle.ReadinessDegraded,
-			Summary: fmt.Sprintf("Provider status: %s Default %s.", missingNote, fallbackNote),
+			Summary: fmt.Sprintf("Provider status: %s Default %s", missingNote, fallbackNote),
 			Remediation: fmt.Sprintf("Set one of %s in the looms environment (or run 'looms config set-key tavily_api_key') and restart looms.",
 				strings.Join(missingEnvVars, ", ")),
 		}

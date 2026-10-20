@@ -97,6 +97,8 @@ func TestWebSearchTool_Readiness(t *testing.T) {
 			assert.Contains(t, schema.Properties["provider"].Description, "default: "+tt.wantDefault)
 			assert.Contains(t, tool.Description(), readiness.Summary)
 
+			assert.NotContains(t, readiness.Summary, "..")
+
 			// Readiness output reaches the LLM and the logs: never a key value.
 			for _, text := range []string{readiness.Summary, readiness.Remediation, tool.Description(), schema.Properties["provider"].Description} {
 				assert.NotContains(t, text, testSecret)
