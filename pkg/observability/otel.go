@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +88,7 @@ func NewOTelTracer(cfg OTelConfig) (*OTelTracer, error) {
 		sdktrace.WithSpanProcessor(processor),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithRawSpanLimits(otelSpanLimits()),
 	)
 
 	return &OTelTracer{
@@ -95,6 +97,23 @@ func NewOTelTracer(cfg OTelConfig) (*OTelTracer, error) {
 		privacy:  cfg.Privacy,
 		recorder: cfg.Recorder,
 	}, nil
+}
+
+// otelAttributeCountLimit is the per-span attribute limit OTelTracer uses
+// unless OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT sets one. The SDK default, 128,
+// silently drops the attributes past it, and an LLM span that records its
+// messages (otlp_capture_llm_messages) has more than that.
+const otelAttributeCountLimit = 4096
+
+// otelSpanLimits returns the SDK's span limits (environment variables
+// included) with the attribute count limit raised to otelAttributeCountLimit
+// when the environment does not set it.
+func otelSpanLimits() sdktrace.SpanLimits {
+	limits := sdktrace.NewSpanLimits()
+	if os.Getenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT") == "" {
+		limits.AttributeCountLimit = otelAttributeCountLimit
+	}
+	return limits
 }
 
 // StartSpan creates a Loom span and a paired OTel span.

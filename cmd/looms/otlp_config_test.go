@@ -130,6 +130,31 @@ func TestLoadConfig_OTLPRecordEvalRuns(t *testing.T) {
 	})
 }
 
+func TestLoadConfig_OTLPCaptureLLMMessages(t *testing.T) {
+	assert.False(t, loadOTLPTestConfig(t, "").Observability.OTLPCaptureLLMMessages, "default off")
+	cfg := loadOTLPTestConfig(t, "  otlp_capture_llm_messages: true\n")
+	assert.True(t, cfg.Observability.OTLPCaptureLLMMessages)
+	require.NoError(t, cfg.Validate())
+}
+
+// TestNewOTLPTracer_AppliesCaptureLLMMessages: the key reaches the
+// process-wide switch the LLM instrumentation reads.
+func TestNewOTLPTracer_AppliesCaptureLLMMessages(t *testing.T) {
+	t.Cleanup(func() { observability.SetCaptureLLMMessages(false) })
+	for _, on := range []bool{true, false} {
+		tr, err := newOTLPTracer(ObservabilityConfig{
+			OTLPEndpoint:           "http://127.0.0.1:6006/v1/traces",
+			OTLPInsecure:           true,
+			OTLPCaptureLLMMessages: on,
+		}, "looms", "test", serveEmbeddedFlushInterval, zap.NewNop())
+		require.NoError(t, err)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = tr.Shutdown(ctx)
+		cancel()
+		assert.Equal(t, on, observability.CaptureLLMMessages())
+	}
+}
+
 func TestNewOTLPTracer_RecordsEvalRuns(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "observability.db")
 	tr, err := newOTLPTracer(ObservabilityConfig{

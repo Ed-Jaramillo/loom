@@ -99,7 +99,7 @@ func firstConfiguredEnv(keys ...string) string {
 // export through and, once it is built, applies the process-wide content
 // bound from obs (the default when otlp_max_content_length is unset). With
 // otlp_record_eval_runs it also opens the embedded eval_runs record, which
-// the tracer closes on Shutdown.
+// the tracer closes on Shutdown. It also applies otlp_capture_llm_messages.
 func newOTLPTracer(obs ObservabilityConfig, serviceName, serviceVersion string, defaultFlush time.Duration, logger *zap.Logger) (*observability.OTelTracer, error) {
 	var recorder *observability.EvalRunRecorder
 	if obs.OTLPRecordEvalRuns {
@@ -136,6 +136,7 @@ func newOTLPTracer(obs ObservabilityConfig, serviceName, serviceVersion string, 
 		maxContent = *obs.OTLPMaxContentLength
 	}
 	observability.SetMaxContentLength(maxContent)
+	observability.SetCaptureLLMMessages(obs.OTLPCaptureLLMMessages)
 	return tracer, nil
 }
 

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### LLM spans can record what the model received (opt-in)
+- **`observability.otlp_capture_llm_messages: true`** records each LLM call's whole request and response on its `llm.completion` span as OpenInference attributes, which Arize Phoenix shows as the call's messages, tools and parameters. Without it a span showed about 3.5% of the request: the newest input as a preview, no system prompt, no history, no tool schemas. The key is off by default, and the previews (`input.value`, `output.value`) are unchanged. Recorded attributes:
+  - `llm.input_messages.<i>.message.*`: role and content of every message (system prompt, history, injected memory blocks), the tool calls with their arguments, and tool results with their call ID. Image blocks are named, not exported.
+  - `llm.tools.<i>.tool.json_schema`: each tool offered, in OpenAI function form.
+  - `llm.invocation_parameters`: the model, plus what the provider reports.
+  - `llm.output_messages.0.message.*`: the response text and its tool calls.
+- **Bounds.** Each content and tool-call argument follows `otlp_max_content_length`. A span records at most 256 KiB of message content in 2,000 attributes, and 64 KiB of tool schemas. Over budget, it keeps the leading system messages and the newest messages, puts one placeholder message (role `loom`) where the others were, and counts them in `loom.llm.messages.omitted`; omitted tools are counted in `loom.llm.tools.omitted`. Export redaction (credentials and PII) applies to every captured value, tool schemas included.
+- **Provider parameters.** `llmtypes.InvocationParameterReporter` lets a provider report the parameters a request carries. The Bedrock (SDK and legacy), Anthropic and OpenAI clients report them, and so do LiteLLM, Mistral and HuggingFace through the OpenAI client. They report `max_tokens` (`max_completion_tokens` where the model takes it), the temperature they send (left out or forced to 1 with thinking, as in the request) and `thinking`. Other providers report the model only.
+- **Span attribute limit.** `OTelTracer` raises the span attribute limit to 4096 unless `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT` sets one. The SDK default, 128, silently drops attributes past it, and a captured span has more.
+- **Local record.** The `eval_runs` record (`otlp_record_eval_runs`) leaves the captured attributes out: it is unredacted and would keep every call's full prompt.
+- The research preset `otlp-phoenix-research.yaml` turns capture on.
+
 #### Judge scores as Arize Phoenix annotations
 - **`observability.phoenix_base_url`** makes `looms serve` post judge evaluations to Phoenix: `EvaluateWithJudges` with `EvaluationContext.trace_id` adds the trace annotations `loom.overall` and `loom.<dimension>` (score, verdict as label, reasoning as explanation, LLM annotator); evaluating again with the same judge replaces them. The API key comes from the keyring key `phoenix_api_key` or `PHOENIX_API_KEY`.
 - **`observability.PhoenixClient`** posts trace, span and session annotations from a background queue, so callers never wait on Phoenix: 5 s timeout, two retries on network errors, 429 and 5xx, PII-redacted label and explanation, drained at shutdown after the OTLP flush. It uses Phoenix's asynchronous mode, which holds an annotation until its trace arrives instead of answering 404.

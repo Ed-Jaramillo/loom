@@ -284,8 +284,10 @@ func spanToEvalRun(span *Span, evalID string) *storage.EvalRun {
 		tokenCount = safeInt32FromInt64(tokens)
 	}
 
-	// Serialize configuration
-	configJSON, _ := json.Marshal(span.Attributes)
+	// Serialize configuration. The messages an LLM span records for OTLP
+	// export (otlp_capture_llm_messages) stay out: the record is unredacted
+	// and would keep every call's full prompt.
+	configJSON, _ := json.Marshal(withoutLLMMessageCapture(span.Attributes))
 
 	return &storage.EvalRun{
 		ID:                span.SpanID,

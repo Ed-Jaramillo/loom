@@ -173,6 +173,9 @@ func (p *InstrumentedProvider) Chat(ctx context.Context, messages []llmtypes.Mes
 	if input := newInputPreview(messages); input != "" && input != preview {
 		span.SetAttribute("input.value", input)
 	}
+	// The whole request as OpenInference messages, tools and parameters
+	// (observability.otlp_capture_llm_messages).
+	recordLLMRequest(ctx, span, p.provider, messages, tools)
 
 	// Record event: LLM call started
 	span.AddEvent("llm.call.started", map[string]interface{}{
@@ -255,6 +258,7 @@ func (p *InstrumentedProvider) Chat(ctx context.Context, messages []llmtypes.Mes
 	if output := toolCallOutputPreview(resp); output != "" {
 		span.SetAttribute("output.value", output)
 	}
+	recordLLMResponse(span, resp)
 
 	// Capture content length (for analysis)
 	span.SetAttribute("llm.content.length", len(resp.Content))
@@ -381,6 +385,9 @@ func (p *InstrumentedProvider) ChatStream(ctx context.Context, messages []llmtyp
 	if input := newInputPreview(messages); input != "" && input != preview {
 		span.SetAttribute("input.value", input)
 	}
+	// The whole request as OpenInference messages, tools and parameters
+	// (observability.otlp_capture_llm_messages).
+	recordLLMRequest(ctx, span, p.provider, messages, tools)
 
 	// Record event: streaming started
 	span.AddEvent("stream.started", map[string]interface{}{
@@ -516,6 +523,7 @@ func (p *InstrumentedProvider) ChatStream(ctx context.Context, messages []llmtyp
 	if output := toolCallOutputPreview(resp); output != "" {
 		span.SetAttribute("output.value", output)
 	}
+	recordLLMResponse(span, resp)
 
 	// Capture content length (for analysis)
 	span.SetAttribute("llm.content.length", len(resp.Content))

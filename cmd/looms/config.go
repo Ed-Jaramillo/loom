@@ -637,6 +637,12 @@ type ObservabilityConfig struct {
 	// (storage_type: sqlite, sqlite_path, flush_interval) while spans are
 	// exported over OTLP. Default false.
 	OTLPRecordEvalRuns bool `mapstructure:"otlp_record_eval_runs"`
+	// OTLPCaptureLLMMessages records each LLM call's messages, tool schemas
+	// and invocation parameters, and its response messages, as OpenInference
+	// attributes (llm.input_messages.*, llm.tools.*, llm.invocation_parameters,
+	// llm.output_messages.*). Each content is bounded by OTLPMaxContentLength
+	// and a span has a size budget; export redaction applies. Default false.
+	OTLPCaptureLLMMessages bool `mapstructure:"otlp_capture_llm_messages"`
 
 	// Arize Phoenix REST API, for annotations (judge scores on traces).
 	// PhoenixBaseURL is Phoenix's HTTP address, for example

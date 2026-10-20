@@ -43,6 +43,11 @@ observability:
   # are redacted before export. Redaction stays on.
   # otlp_max_content_length: 32768
   #
+  # otlp_capture_llm_messages records each LLM call's messages, tool schemas
+  # and invocation parameters (bounded, redacted), so Phoenix shows what the
+  # model received. Off by default; Phoenix's database grows with it.
+  # otlp_capture_llm_messages: true
+  #
   # otlp_record_eval_runs also writes the embedded eval_runs record (Loom
   # attribute names, unredacted) while exporting; it needs SQLite storage.
   # otlp_record_eval_runs: true

@@ -44,6 +44,14 @@ observability:
   # strings) are redacted before export. Redaction stays on.
   otlp_max_content_length: 32768
   #
+  # Record each LLM call's messages (system prompt, history, memory blocks,
+  # tool calls and results), the tool schemas and the invocation parameters,
+  # so Phoenix shows exactly what the model received. Each content follows
+  # otlp_max_content_length; a span keeps at most 256 KiB of messages and
+  # 64 KiB of tool schemas, and says how many messages it left out. Phoenix's
+  # database grows with every call's full prompt.
+  otlp_capture_llm_messages: true
+  #
   # Keep writing the embedded eval_runs record (Loom attribute names,
   # unredacted) while exporting, so the trace_reports analysis works as
   # with mode: embedded. Previews in it are up to 32768 runes as well.
