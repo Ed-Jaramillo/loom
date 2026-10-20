@@ -51,7 +51,18 @@ blocking resolver never invoked.
 | `Ask` | **approval item** |
 | `contact_human`, registered, not denied | **question item** |
 | `contact_human`, unregistered | never an item; "tool not found" at execution |
+| `shuttle.ParkableQuestion` tool, registered, `ParkQuestion` ok, not denied | **question item** |
 | `Allow` / `NoDecision` | never an item; dispatches normally at resume |
+
+A tool is not limited to the literal name `contact_human` to park as a
+question. A tool that implements `shuttle.ParkableQuestion` (`ParkQuestion`
+reports whether the call parks and the question text; `ParkAnswerResult`
+builds the tool result from the human's answer) is parked exactly like
+`contact_human`: its `Execute` never runs for a parked call, the descriptor
+carries the full input under `params`, and on an approved resume the agent
+synthesizes the result from `ParkAnswerResult`. When `ParkQuestion` reports
+`ok=false` (e.g. invalid input) the call dispatches normally so the model sees
+a repairable tool error. Policy is unchanged: a `Deny` is never lifted.
 
 One or more items parks the **whole batch**: a single grouped `human_requests`
 row whose `params` carry one descriptor per item keyed by `ToolCall.ID`, a
