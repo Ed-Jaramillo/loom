@@ -48,7 +48,7 @@ const (
 	// DefaultMaxResultBytes bounds one tool result handed to the model.
 	DefaultMaxResultBytes = 64 << 10
 	// DefaultMaxValueChars bounds each attribute value.
-	DefaultMaxValueChars = 500
+	DefaultMaxValueChars = 4000
 )
 
 // Config configures both tools.
