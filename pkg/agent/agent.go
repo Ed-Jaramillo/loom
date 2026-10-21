@@ -3247,6 +3247,10 @@ func (a *Agent) dispatchOneCall(ctx Context, session *Session, toolCall ToolCall
 	// Execute tool with tracing — always created
 	_, toolSpan := ctx.Tracer().StartSpan(ctx, "agent.tool_execution")
 	toolSpan.SetAttribute("tool_name", toolCall.Name)
+	toolSpan.SetAttribute("tool.name", toolCall.Name)
+	if args, mErr := json.Marshal(toolCall.Input); mErr == nil {
+		toolSpan.SetAttribute("message.preview", truncatePreview(string(args)))
+	}
 
 	// Execute with self-correction (circuit breaker + SQL correction)
 	result, err := a.executeToolWithSelfCorrection(ctx, toolCall.Name, toolCall.Input, session.ID)
@@ -3318,6 +3322,9 @@ func (a *Agent) dispatchOneCall(ctx Context, session *Session, toolCall ToolCall
 		toolSpan.SetAttribute("success", fmt.Sprintf("%t", success))
 		if result != nil {
 			toolSpan.SetAttribute("execution_time_ms", fmt.Sprintf("%d", result.ExecutionTimeMs))
+			if out, mErr := json.Marshal(result); mErr == nil {
+				toolSpan.SetAttribute("response.preview", truncatePreview(string(out)))
+			}
 		}
 		ctx.Tracer().EndSpan(toolSpan)
 	}

@@ -155,3 +155,41 @@ func spanKindFor(name string) oteltrace.SpanKind {
 		return oteltrace.SpanKindInternal
 	}
 }
+
+// OpenInference keys, which Phoenix reads for its span kind and Input/Output
+// columns. Spec: https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md
+const (
+	oiSpanKind      = "openinference.span.kind"
+	oiInputValue    = "input.value"
+	oiInputMIME     = "input.mime_type"
+	oiOutputValue   = "output.value"
+	oiOutputMIME    = "output.mime_type"
+	oiMIMETextPlain = "text/plain"
+)
+
+// openInferenceKindFor returns the OpenInference span kind for a Loom span name.
+func openInferenceKindFor(name string) string {
+	switch {
+	case strings.HasPrefix(name, "llm."):
+		return "LLM"
+	case name == "agent.tool_execution", strings.HasPrefix(name, "tool."), strings.HasPrefix(name, "mcp.tool"):
+		return "TOOL"
+	case strings.HasPrefix(name, "agent.chat"), name == "agent.conversation_loop":
+		return "AGENT"
+	default:
+		return "CHAIN"
+	}
+}
+
+// setOpenInferenceAttrs adds the OpenInference kind, input and output to an
+// OTel span. Input and output come from the same previews that feed
+// gen_ai.prompt and gen_ai.completion, so they are bounded and already redacted.
+func setOpenInferenceAttrs(otelSpan oteltrace.Span, name string, attrs map[string]interface{}) {
+	otelSpan.SetAttributes(attribute.String(oiSpanKind, openInferenceKindFor(name)))
+	if in, ok := attrs["message.preview"].(string); ok && in != "" {
+		otelSpan.SetAttributes(attribute.String(oiInputValue, in), attribute.String(oiInputMIME, oiMIMETextPlain))
+	}
+	if out, ok := attrs["response.preview"].(string); ok && out != "" {
+		otelSpan.SetAttributes(attribute.String(oiOutputValue, out), attribute.String(oiOutputMIME, oiMIMETextPlain))
+	}
+}

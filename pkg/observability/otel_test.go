@@ -746,3 +746,46 @@ func TestResolveOTelConfigInsecure(t *testing.T) {
 func TestOTelTracerImplementsTracer(t *testing.T) {
 	var _ Tracer = (*OTelTracer)(nil) // compile-time check duplicated for clarity
 }
+
+// TestOpenInferenceAttrs verifies the span kind, input and output Phoenix reads.
+func TestOpenInferenceAttrs(t *testing.T) {
+	tr, exp := newInMemoryOTelTracer(t)
+
+	cases := []struct {
+		name, kind, in, out string
+	}{
+		{"llm.completion", "LLM", "hi", "hello"},
+		{"agent.chat_with_progress", "AGENT", "question", "answer"},
+		{"agent.tool_execution", "TOOL", `{"q":1}`, `{"success":true}`},
+		{"session_store.save_message", "CHAIN", "", ""},
+	}
+	for _, c := range cases {
+		_, s := tr.StartSpan(context.Background(), c.name)
+		if c.in != "" {
+			s.SetAttribute("message.preview", c.in)
+			s.SetAttribute("response.preview", c.out)
+		}
+		tr.EndSpan(s)
+	}
+
+	got := map[string]map[string]string{}
+	for _, s := range exp.GetSpans() {
+		m := map[string]string{}
+		for _, kv := range s.Attributes {
+			m[string(kv.Key)] = kv.Value.Emit()
+		}
+		got[s.Name] = m
+	}
+	for _, c := range cases {
+		a := got[c.name]
+		if a["openinference.span.kind"] != c.kind {
+			t.Errorf("%s: kind = %q, want %q", c.name, a["openinference.span.kind"], c.kind)
+		}
+		if a["input.value"] != c.in || a["output.value"] != c.out {
+			t.Errorf("%s: input/output = %q/%q, want %q/%q", c.name, a["input.value"], a["output.value"], c.in, c.out)
+		}
+		if _, ok := a["input.mime_type"]; ok != (c.in != "") {
+			t.Errorf("%s: input.mime_type present = %v", c.name, ok)
+		}
+	}
+}
