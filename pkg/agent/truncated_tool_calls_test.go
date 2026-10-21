@@ -264,3 +264,71 @@ func TestTruncatedToolCall_NotParkedNorRunOnResume(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), tool.runs.Load(), "approval runs the complete call only")
 }
+
+// actionCountingTool requires only "action" in its schema, but its "write"
+// action needs "filename" and "content" (like the workspace tool), declared
+// through shuttle.ConditionalArgsTool.
+type actionCountingTool struct {
+	runs atomic.Int64
+}
+
+func (t *actionCountingTool) Name() string        { return "workspace" }
+func (t *actionCountingTool) Description() string { return "reads and writes files" }
+func (t *actionCountingTool) Backend() string     { return "" }
+func (t *actionCountingTool) InputSchema() *shuttle.JSONSchema {
+	return &shuttle.JSONSchema{
+		Type: "object",
+		Properties: map[string]*shuttle.JSONSchema{
+			"action":   {Type: "string"},
+			"filename": {Type: "string"},
+			"content":  {Type: "string"},
+		},
+		Required: []string{"action"},
+	}
+}
+func (t *actionCountingTool) RequiredArgsFor(params map[string]interface{}) []string {
+	if params["action"] == "write" {
+		return []string{"filename", "content"}
+	}
+	return nil
+}
+func (t *actionCountingTool) Execute(_ context.Context, _ map[string]interface{}) (*shuttle.Result, error) {
+	t.runs.Add(1)
+	return &shuttle.Result{Success: true, Data: "written"}, nil
+}
+
+// TestTruncatedToolCall_ActionDependentArgsCount covers a write cut off
+// before its content: the schema's own required list is satisfied, so only
+// the tool's call-dependent requirements show the call is incomplete.
+func TestTruncatedToolCall_ActionDependentArgsCount(t *testing.T) {
+	tool := &actionCountingTool{}
+	cut := llmtypes.ToolCall{ID: "c-ws", Name: "workspace", Input: map[string]interface{}{"action": "write", "filename": "conferences.json"}}
+	llm := &recordingStopReasonLLM{responses: []scriptedResponse{
+		{content: "Writing the file.", toolCalls: []llmtypes.ToolCall{cut}, stopReason: "max_tokens"},
+	}}
+	ag := newTruncationAgent(t, llm, tool)
+
+	_, err := ag.Chat(context.Background(), "s-ws", "research")
+	require.NoError(t, err)
+	assert.Zero(t, tool.runs.Load(), "a write cut off before its content must not run")
+
+	row, ok := toolRowFor(llm.requestAt(t, 1), "c-ws")
+	require.True(t, ok)
+	assert.Contains(t, row, outputTruncatedCode)
+	assert.Contains(t, row, "missing: content")
+}
+
+// TestTruncatedToolCall_ActionDependentArgsCompleteCallRuns checks that a
+// complete write in a max_tokens response still runs.
+func TestTruncatedToolCall_ActionDependentArgsCompleteCallRuns(t *testing.T) {
+	tool := &actionCountingTool{}
+	whole := llmtypes.ToolCall{ID: "c-ok", Name: "workspace", Input: map[string]interface{}{"action": "write", "filename": "a.txt", "content": "x"}}
+	llm := &recordingStopReasonLLM{responses: []scriptedResponse{
+		{content: "Writing the file.", toolCalls: []llmtypes.ToolCall{whole}, stopReason: "max_tokens"},
+	}}
+	ag := newTruncationAgent(t, llm, tool)
+
+	_, err := ag.Chat(context.Background(), "s-ok", "research")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), tool.runs.Load(), "a complete call must still run")
+}
