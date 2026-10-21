@@ -138,12 +138,24 @@ Phoenix emits pydantic-ai's Vercel AI UI message stream: one `data: <json>` line
 
 ### Assistant tool (`pkg/sentinel/assistant`)
 
-**Responsibility**: one `ask_phoenix_assistant` call is one ephemeral PXI session answering one question about one trace.
+**Responsibility**: one `ask_phoenix_assistant` call is one ephemeral PXI session investigating one trace. PXI does the trace analysis; the calling Loom agent coordinates, supplies Loom-only facts and judges the findings.
+
+**Investigation contract**:
+
+| Sent to PXI | Returned to the agent |
+|---|---|
+| The question | PXI's text |
+| Fixed instructions (prompt key `tools.ask_phoenix_assistant_request`) | `findings`: observed facts with span IDs, candidate explanations with confidence, missing information, suggested remedies |
+| Loom context as JSON: `trace_id`, focus span, `loom_version`, plus caller-supplied `suspected_failure`, `scope` and `loom_context` (effective config with sources, run IDs, intentional restrictions) | `citations`: every cited span ID checked against the trace; unsupported facts and explanations counted |
+| Trace and span UI contexts | Tool calls with approval decisions, PXI usage and trace IDs, warnings |
+
+The prompt takes no variables. The prompt registry HTML-escapes and sanitizes interpolated values as an injection defense, which would garble the question and the JSON, so Go appends both as data around the fixed text.
 
 **Policy**: approval requests are answered from the transcript's `approval-requested` tool parts. A tool is approved only when its name is in `approve_tools`; everything else is denied. The decision and the tool name are reported back.
 
 **Invariants**:
-- No session is created for an invalid trace ID or a trace with no spans in the project.
+- No session is created for an invalid trace ID, a trace with no spans in the project, or a `span_id` not in the trace.
+- A fact or explanation is `supported` only when at least one span ID it cites appears in the trace's span listing. Span IDs in free text are checked too.
 - The transcript, not the stream, is the source of the final answer and of pending approvals; the stream is used to wait for the turn and as a fallback.
 - At most `MaxApprovalRounds` continuations per call; past that the answer is marked `approvals_unresolved`.
 
@@ -186,6 +198,12 @@ Agent        Tool            Phoenix REST                 PXI
 
 What one stream yielded: assistant text, tool calls keyed by `toolCallId` with their last state, approval IDs, finish reason, errors, message metadata, a chunk-type histogram, unknown samples, byte count and truncation flag. Tool call order is first-seen order.
 
+### `Findings` and `CitationCheck`
+
+`Findings` is parsed from the last fenced json block of PXI's reply, falling back to the last top-level JSON object. Confidence values outside low, medium and high become `unspecified`. `CitationCheck` holds the trace's span count, verified and unverified IDs, counts of unsupported items, and whether the span listing was truncated, in which case an unverified ID may still exist.
+
+**Invariant**: `supported == true` implies at least one cited ID ∈ the listed span IDs of the trace.
+
 ### `Answer`
 
 The tool's result. Text plus provenance: project node ID, session ID, model, tool calls with approval decisions, denied and approved tool names, approval rounds, summed usage, PXI's own trace IDs, stream chunk types, warnings and elapsed time. It carries a fixed trust note as its first field.
@@ -220,7 +238,15 @@ The tool's result. Text plus provenance: project node ID, session ID, model, too
 
 **Alternative**: `editPermission: bypass` (rejected: hands Phoenix writes to a model-driven loop).
 
-### Decision 4: Ephemeral sessions
+### Decision 4: Check citations deterministically
+
+**Chosen**: list the trace's spans before the PXI turn and compare every cited span ID with that set after it.
+
+**Rationale**: a model's citations are claims. A set-membership check is cheap, exact and independent of PXI, and it turns "PXI says" into "PXI says, and spans X and Y exist". It does not prove a span supports a statement, only that the reference is real.
+
+**Cost**: one paged span listing per call, which doubles as the trace existence check.
+
+### Decision 5: Ephemeral sessions
 
 **Chosen**: one `is_ephemeral: true` session per call.
 

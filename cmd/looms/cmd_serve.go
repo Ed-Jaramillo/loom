@@ -190,6 +190,7 @@ func registerYAMLBuiltinTools(
 	logger *zap.Logger,
 	indent string,
 	agentManagementLogTag string,
+	promptRegistry prompts.PromptRegistry,
 ) {
 	if cfg.Tools == nil || len(cfg.Tools.Builtin) == 0 {
 		return
@@ -240,11 +241,19 @@ func registerYAMLBuiltinTools(
 		}
 
 		var tool shuttle.Tool
-		if toolName == assistant.ToolName {
+		if isPhoenixReadTool(toolName) {
+			// Read-only Phoenix tools; need only sentinel.phoenix.base_url and the key.
+			built, err := newPhoenixReadTool(toolName, config)
+			if err != nil {
+				logger.Warn(indent+"  "+toolName+" not registered", zap.Error(err))
+				continue
+			}
+			tool = built
+		} else if toolName == assistant.ToolName {
 			// Needs the server's Phoenix client; built from sentinel.phoenix.
 			// Nil (with the reason logged) when the tool is disabled or the
 			// API key env var is unset, so the YAML mention is not an error.
-			built, err := newPhoenixAssistantTool(config, logger)
+			built, err := newPhoenixAssistantTool(config, promptRegistry, logger)
 			if err != nil {
 				logger.Warn(indent+"  ask_phoenix_assistant not registered", zap.Error(err))
 				continue
@@ -2164,7 +2173,7 @@ func runServe(cmd *cobra.Command, args []string) {
 				// Register builtin tools declared in YAML. Shared with the
 				// hot-reload path via registerYAMLBuiltinTools so the two
 				// paths cannot drift.
-				registerYAMLBuiltinTools(ag, cfg, registry, logger, "    ", "agent_management")
+				registerYAMLBuiltinTools(ag, cfg, registry, logger, "    ", "agent_management", promptRegistry)
 
 				// Register contact_human tool with the shared HITL store (if listed in builtin tools)
 				if cfg.Tools != nil {
@@ -3448,7 +3457,7 @@ func runServe(cmd *cobra.Command, args []string) {
 			// cannot drift — this previously short-circuited unconditionally
 			// on toolName=="shell_execute" and silently dropped YAML-declared
 			// shell_execute on hot reload under tools.minimal/none.
-			registerYAMLBuiltinTools(newAgent, agentConfig, registry, logger, "  ", "agent_management (reload)")
+			registerYAMLBuiltinTools(newAgent, agentConfig, registry, logger, "  ", "agent_management (reload)", promptRegistry)
 
 			// Register contact_human tool with shared HITL store (if listed in builtin tools)
 			if agentConfig.Tools != nil {

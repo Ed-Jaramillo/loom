@@ -86,23 +86,23 @@ func TestSentinelConfig_Validate(t *testing.T) {
 
 func TestNewPhoenixAssistantTool(t *testing.T) {
 	t.Run("nil config", func(t *testing.T) {
-		_, err := newPhoenixAssistantTool(nil, zap.NewNop())
+		_, err := newPhoenixAssistantTool(nil, nil, zap.NewNop())
 		require.Error(t, err)
 	})
 	t.Run("disabled", func(t *testing.T) {
 		cfg := enabledSentinelConfig()
 		cfg.Sentinel.Phoenix.Assistant.Enabled = false
-		_, err := newPhoenixAssistantTool(cfg, zap.NewNop())
+		_, err := newPhoenixAssistantTool(cfg, nil, zap.NewNop())
 		assert.True(t, errors.Is(err, errPhoenixAssistantDisabled))
 	})
 	t.Run("missing key env", func(t *testing.T) {
 		t.Setenv("LOOM_TEST_PHOENIX_KEY", "")
-		_, err := newPhoenixAssistantTool(enabledSentinelConfig(), zap.NewNop())
+		_, err := newPhoenixAssistantTool(enabledSentinelConfig(), nil, zap.NewNop())
 		assert.ErrorContains(t, err, "LOOM_TEST_PHOENIX_KEY")
 	})
 	t.Run("configured", func(t *testing.T) {
 		t.Setenv("LOOM_TEST_PHOENIX_KEY", "secret")
-		tool, err := newPhoenixAssistantTool(enabledSentinelConfig(), zap.NewNop())
+		tool, err := newPhoenixAssistantTool(enabledSentinelConfig(), nil, zap.NewNop())
 		require.NoError(t, err)
 		assert.Equal(t, assistant.ToolName, tool.Name())
 	})
@@ -118,7 +118,7 @@ func TestRegisterYAMLBuiltinTools_PhoenixAssistant(t *testing.T) {
 	t.Run("skipped when the server has no sentinel config", func(t *testing.T) {
 		config = nil
 		ag := agent.NewAgent(nil, nil)
-		registerYAMLBuiltinTools(ag, newCfg(assistant.ToolName, "http_request"), nil, zap.NewNop(), "  ", "agent_management")
+		registerYAMLBuiltinTools(ag, newCfg(assistant.ToolName, "http_request"), nil, zap.NewNop(), "  ", "agent_management", nil)
 		assert.False(t, hasTool(ag, assistant.ToolName))
 		assert.True(t, hasTool(ag, "http_request"), "other tools still register")
 	})
@@ -126,13 +126,46 @@ func TestRegisterYAMLBuiltinTools_PhoenixAssistant(t *testing.T) {
 		config = enabledSentinelConfig()
 		config.Sentinel.Phoenix.Assistant.Enabled = false
 		ag := agent.NewAgent(nil, nil)
-		registerYAMLBuiltinTools(ag, newCfg(assistant.ToolName), nil, zap.NewNop(), "  ", "agent_management")
+		registerYAMLBuiltinTools(ag, newCfg(assistant.ToolName), nil, zap.NewNop(), "  ", "agent_management", nil)
 		assert.False(t, hasTool(ag, assistant.ToolName))
 	})
 	t.Run("registered when enabled", func(t *testing.T) {
 		config = enabledSentinelConfig()
 		ag := agent.NewAgent(nil, nil)
-		registerYAMLBuiltinTools(ag, newCfg(assistant.ToolName), nil, zap.NewNop(), "  ", "agent_management")
+		registerYAMLBuiltinTools(ag, newCfg(assistant.ToolName), nil, zap.NewNop(), "  ", "agent_management", nil)
 		assert.True(t, hasTool(ag, assistant.ToolName))
+	})
+}
+
+func TestRegisterYAMLBuiltinTools_PhoenixReadTools(t *testing.T) {
+	withViperMinimalMode(t, false, false)
+	prev := config
+	t.Cleanup(func() { config = prev })
+
+	t.Run("registered with base_url and key, assistant disabled", func(t *testing.T) {
+		t.Setenv("LOOM_TEST_PHOENIX_KEY", "secret")
+		config = enabledSentinelConfig()
+		config.Sentinel.Phoenix.Assistant.Enabled = false
+		ag := agent.NewAgent(nil, nil)
+		registerYAMLBuiltinTools(ag, newCfg("phoenix_list_traces", "phoenix_list_spans"), nil, zap.NewNop(), "  ", "agent_management", nil)
+		assert.True(t, hasTool(ag, "phoenix_list_traces"))
+		assert.True(t, hasTool(ag, "phoenix_list_spans"))
+		assert.False(t, hasTool(ag, assistant.ToolName))
+	})
+	t.Run("skipped without the API key", func(t *testing.T) {
+		t.Setenv("LOOM_TEST_PHOENIX_KEY", "")
+		config = enabledSentinelConfig()
+		ag := agent.NewAgent(nil, nil)
+		registerYAMLBuiltinTools(ag, newCfg("phoenix_list_spans", "http_request"), nil, zap.NewNop(), "  ", "agent_management", nil)
+		assert.False(t, hasTool(ag, "phoenix_list_spans"))
+		assert.True(t, hasTool(ag, "http_request"))
+	})
+	t.Run("skipped without base_url", func(t *testing.T) {
+		t.Setenv("LOOM_TEST_PHOENIX_KEY", "secret")
+		config = enabledSentinelConfig()
+		config.Sentinel.Phoenix.BaseURL = ""
+		ag := agent.NewAgent(nil, nil)
+		registerYAMLBuiltinTools(ag, newCfg("phoenix_list_spans"), nil, zap.NewNop(), "  ", "agent_management", nil)
+		assert.False(t, hasTool(ag, "phoenix_list_spans"))
 	})
 }

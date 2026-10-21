@@ -22,9 +22,12 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/teradata-labs/loom/internal/version"
 	"github.com/teradata-labs/loom/pkg/observability"
 	"github.com/teradata-labs/loom/pkg/observability/phoenix"
+	"github.com/teradata-labs/loom/pkg/prompts"
 	"github.com/teradata-labs/loom/pkg/sentinel/assistant"
+	"github.com/teradata-labs/loom/pkg/sentinel/phoenixread"
 	"github.com/teradata-labs/loom/pkg/shuttle"
 )
 
@@ -72,7 +75,7 @@ func newPhoenixClient(cfg *Config, tracer observability.Tracer) (*phoenix.Client
 // newPhoenixAssistantTool builds ask_phoenix_assistant from sentinel.phoenix.
 // It returns an error, not a tool, when the tool is disabled or cannot be
 // configured; the caller logs and skips the YAML mention.
-func newPhoenixAssistantTool(cfg *Config, logger *zap.Logger) (shuttle.Tool, error) {
+func newPhoenixAssistantTool(cfg *Config, promptRegistry prompts.PromptRegistry, logger *zap.Logger) (shuttle.Tool, error) {
 	if cfg == nil {
 		return nil, errors.New("server config is not loaded")
 	}
@@ -104,6 +107,8 @@ func newPhoenixAssistantTool(cfg *Config, logger *zap.Logger) (shuttle.Tool, err
 		Timeout:           timeout,
 		MaxApprovalRounds: a.MaxApprovalRounds,
 		RecordLocalTraces: a.RecordLocalTraces,
+		Prompts:           promptRegistry,
+		LoomVersion:       version.Get(),
 	})
 	if err != nil {
 		return nil, err
@@ -117,4 +122,24 @@ func newPhoenixAssistantTool(cfg *Config, logger *zap.Logger) (shuttle.Tool, err
 			zap.Bool("record_local_traces", a.RecordLocalTraces))
 	}
 	return tool, nil
+}
+
+// isPhoenixReadTool reports whether name is one of the read-only Phoenix tools.
+func isPhoenixReadTool(name string) bool {
+	for _, n := range phoenixread.Names() {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// newPhoenixReadTool builds a read-only Phoenix tool from sentinel.phoenix.
+// It needs base_url and the API key env var, not the assistant switch.
+func newPhoenixReadTool(name string, cfg *Config) (shuttle.Tool, error) {
+	client, err := newPhoenixClient(cfg, nil)
+	if err != nil {
+		return nil, err
+	}
+	return phoenixread.New(name, client, phoenixread.Config{Project: cfg.Sentinel.Phoenix.Project})
 }
