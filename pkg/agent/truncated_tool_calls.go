@@ -65,6 +65,7 @@ func missingRequiredArgs(tc ToolCall, tools []shuttle.Tool) []string {
 			missing = append(missing, name)
 		}
 	}
+	missing = append(missing, missingConditionalArgs(tool, input)...)
 	sort.Strings(missing)
 	return missing
 }
