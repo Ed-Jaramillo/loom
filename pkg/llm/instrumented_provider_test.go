@@ -27,6 +27,7 @@ import (
 	llmtypes "github.com/teradata-labs/loom/pkg/llm/types"
 	"github.com/teradata-labs/loom/pkg/observability"
 	"github.com/teradata-labs/loom/pkg/shuttle"
+	"github.com/teradata-labs/loom/pkg/types"
 )
 
 // mockLLMProvider is a mock implementation for testing
@@ -212,7 +213,7 @@ func TestInstrumentedProvider_Success(t *testing.T) {
 }
 
 func TestInstrumentedProvider_BoundsPromptAndCompletionPreviews(t *testing.T) {
-	content := strings.Repeat("界", maxPreviewRunes+25)
+	content := strings.Repeat("界", observability.PreviewMaxChars()+25)
 	mockProvider := &mockLLMProvider{
 		name:     "test-provider",
 		model:    "test-model",
@@ -225,7 +226,7 @@ func TestInstrumentedProvider_BoundsPromptAndCompletionPreviews(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tracer.spans, 1)
 
-	want := strings.Repeat("界", maxPreviewRunes) + "…"
+	want := strings.Repeat("界", observability.PreviewMaxChars()) + "…"
 	assert.Equal(t, want, tracer.spans[0].Attributes["message.preview"])
 	assert.Equal(t, want, tracer.spans[0].Attributes["response.preview"])
 }
@@ -515,4 +516,29 @@ func TestInstrumentedProvider_ConcurrentCalls(t *testing.T) {
 
 	// Verify spans (should have one per call)
 	assert.Equal(t, concurrency, len(tracer.spans))
+}
+
+func TestInstrumentedProvider_RecordsInputMessages(t *testing.T) {
+	mockProvider := &mockLLMProvider{name: "test-provider", model: "test-model", response: &llmtypes.LLMResponse{Content: "done"}}
+	tracer := newMockTracer()
+	instrumented := NewInstrumentedProvider(mockProvider, tracer)
+
+	messages := []llmtypes.Message{
+		{Role: "system", Content: "Answer briefly."},
+		{Role: "user", ContentBlocks: []types.ContentBlock{{Type: "text", Text: "weather?"}, {Type: "image"}}},
+		{Role: "assistant", ToolCalls: []llmtypes.ToolCall{{ID: "c1", Name: "get_weather", Input: map[string]interface{}{"city": "NYC"}}}},
+		{Role: "tool", Content: `{"temp":20}`},
+	}
+	_, err := instrumented.Chat(context.Background(), messages, nil)
+	require.NoError(t, err)
+	attrs := tracer.spans[0].Attributes
+
+	assert.Equal(t, "system", attrs["llm.input_messages.0.message.role"])
+	assert.Equal(t, "Answer briefly.", attrs["llm.input_messages.0.message.content"])
+	assert.Equal(t, "weather?", attrs["llm.input_messages.1.message.content"])
+	assert.Equal(t, "get_weather", attrs["llm.input_messages.2.message.tool_calls.0.tool_call.function.name"])
+	assert.Equal(t, `{"city":"NYC"}`, attrs["llm.input_messages.2.message.tool_calls.0.tool_call.function.arguments"])
+	_, hasContent := attrs["llm.input_messages.2.message.content"]
+	assert.False(t, hasContent, "no content attribute for a tool-call-only message")
+	assert.Equal(t, `{"temp":20}`, attrs["llm.input_messages.3.message.content"])
 }

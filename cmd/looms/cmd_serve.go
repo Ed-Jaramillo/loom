@@ -1193,6 +1193,7 @@ func runServe(cmd *cobra.Command, args []string) {
 
 	applyOTLPEnvOverride(&config.Observability, logger)
 
+	observability.SetPreviewMaxChars(config.Observability.PreviewMaxChars)
 	if config.Observability.Enabled {
 		mode := config.Observability.Mode
 		if mode == "" {

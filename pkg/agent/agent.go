@@ -1917,18 +1917,9 @@ func hasTextBlock(blocks []ContentBlock) bool {
 	return false
 }
 
-// maxPreviewLen is the maximum number of runes recorded in span preview attributes
-// to avoid bloating OTLP traces with large message bodies.
-const maxPreviewLen = 200
-
-// truncatePreview returns up to maxPreviewLen runes of s, appending "…" when truncated.
-func truncatePreview(s string) string {
-	runes := []rune(s)
-	if len(runes) <= maxPreviewLen {
-		return s
-	}
-	return string(runes[:maxPreviewLen]) + "…"
-}
+// truncatePreview bounds span preview attributes; the bound is
+// observability.PreviewMaxChars (config: observability.preview_max_chars).
+func truncatePreview(s string) string { return observability.TruncatePreview(s) }
 
 // chat runs the full conversation lifecycle — span setup, user-message
 // persistence, graph-memory kick-off, the conversation loop, and success/error

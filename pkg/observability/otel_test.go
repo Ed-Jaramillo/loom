@@ -789,3 +789,35 @@ func TestOpenInferenceAttrs(t *testing.T) {
 		}
 	}
 }
+
+func TestTruncatePreviewUsesConfiguredLimit(t *testing.T) {
+	t.Cleanup(func() { SetPreviewMaxChars(0) })
+	if got := TruncatePreview(strings.Repeat("a", DefaultPreviewMaxChars)); got != strings.Repeat("a", DefaultPreviewMaxChars) {
+		t.Errorf("default limit cut a %d-rune value", DefaultPreviewMaxChars)
+	}
+	SetPreviewMaxChars(3)
+	if got := TruncatePreview("界界界界"); got != "界界界…" {
+		t.Errorf("TruncatePreview = %q, want 3 runes plus ellipsis", got)
+	}
+	SetPreviewMaxChars(-1)
+	if PreviewMaxChars() != DefaultPreviewMaxChars {
+		t.Errorf("non-positive limit should restore the default, got %d", PreviewMaxChars())
+	}
+}
+
+func TestInputMessagesExportedUnprefixed(t *testing.T) {
+	tr, exp := newInMemoryOTelTracer(t)
+	_, s := tr.StartSpan(context.Background(), "llm.completion")
+	s.SetAttribute("llm.input_messages.0.message.role", "system")
+	s.SetAttribute("llm.input_messages.1.message.content", "hi")
+	tr.EndSpan(s)
+	keys := map[string]bool{}
+	for _, kv := range exp.GetSpans()[0].Attributes {
+		keys[string(kv.Key)] = true
+	}
+	for _, k := range []string{"llm.input_messages.0.message.role", "llm.input_messages.1.message.content"} {
+		if !keys[k] {
+			t.Errorf("%s not exported as-is", k)
+		}
+	}
+}

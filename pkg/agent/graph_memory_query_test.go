@@ -237,7 +237,7 @@ func TestInjectGraphMemoryContextRecordsStoreErrors(t *testing.T) {
 // attribute in this file, so a long recall query cannot bloat trace payloads.
 func TestInjectGraphMemoryContextTruncatesQueryAttribute(t *testing.T) {
 	store := newTestGraphMemoryStore(t)
-	longQuery := strings.Repeat("volatile ", 400)
+	longQuery := strings.Repeat("volatile ", observability.PreviewMaxChars()/9+50)
 
 	tracer := observability.NewMockTracer()
 	a := &Agent{
@@ -257,6 +257,6 @@ func TestInjectGraphMemoryContextTruncatesQueryAttribute(t *testing.T) {
 	require.Len(t, spans, 1)
 	recorded, ok := spans[0].Attributes["recall.query"].(string)
 	require.True(t, ok, "recall.query must be recorded")
-	assert.LessOrEqual(t, len([]rune(recorded)), maxPreviewLen+1, "recall.query must be truncated")
+	assert.LessOrEqual(t, len([]rune(recorded)), observability.PreviewMaxChars()+1, "recall.query must be truncated")
 	assert.Less(t, len(recorded), len(longQuery))
 }

@@ -551,6 +551,7 @@ func setupWorkflowRuntime(pattern *loomv1.WorkflowPattern, promptGates bool) (*w
 	var tracer observability.Tracer
 
 	applyOTLPEnvOverride(&config.Observability, logger)
+	observability.SetPreviewMaxChars(config.Observability.PreviewMaxChars)
 
 	if config.Observability.Enabled {
 		mode := config.Observability.Mode

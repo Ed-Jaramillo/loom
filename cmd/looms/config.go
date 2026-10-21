@@ -633,6 +633,11 @@ type ObservabilityConfig struct {
 	OTLPHeaders      map[string]string `mapstructure:"otlp_headers"`       // e.g. Authorization: Bearer <key>
 	OTLPInsecure     bool              `mapstructure:"otlp_insecure"`      // Use plaintext HTTP (local dev only)
 	OTLPIncludeSpans []string          `mapstructure:"otlp_include_spans"` // Span name prefixes to export; empty = all
+
+	// PreviewMaxChars bounds each text preview recorded on spans (prompts,
+	// completions, LLM input messages, tool arguments and results), in runes.
+	// Zero means observability.DefaultPreviewMaxChars (32768).
+	PreviewMaxChars int `mapstructure:"preview_max_chars"`
 }
 
 // LoggingConfig holds logging configuration.
@@ -851,6 +856,10 @@ type SentinelPhoenixConfig struct {
 
 	// MaxResponseBytes bounds one response body.
 	MaxResponseBytes int64 `mapstructure:"max_response_bytes"`
+
+	// ReadMaxValueChars bounds each attribute value phoenix_list_spans returns
+	// to the model. Zero means phoenixread.DefaultMaxValueChars.
+	ReadMaxValueChars int `mapstructure:"read_max_value_chars"`
 
 	// Assistant configures the ask_phoenix_assistant tool.
 	Assistant SentinelAssistantConfig `mapstructure:"assistant"`
@@ -1837,6 +1846,9 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate observability config
+	if c.Observability.PreviewMaxChars < 0 {
+		return fmt.Errorf("observability.preview_max_chars must be >= 0")
+	}
 	if c.Observability.Enabled {
 		mode := c.Observability.Mode
 		if mode == "" {
@@ -1905,6 +1917,9 @@ func (s *SentinelConfig) Validate() error {
 	}
 	if p.MaxResponseBytes < 0 {
 		return fmt.Errorf("sentinel.phoenix.max_response_bytes must be >= 0")
+	}
+	if p.ReadMaxValueChars < 0 {
+		return fmt.Errorf("sentinel.phoenix.read_max_value_chars must be >= 0")
 	}
 	a := &p.Assistant
 	if a.Timeout != "" {

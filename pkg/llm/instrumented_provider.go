@@ -15,6 +15,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -99,6 +100,7 @@ func (p *InstrumentedProvider) Chat(ctx context.Context, messages []llmtypes.Mes
 	if preview := lastUserMessagePreview(messages); preview != "" {
 		span.SetAttribute("message.preview", preview)
 	}
+	setInputMessages(span, messages)
 
 	// Record event: LLM call started
 	span.AddEvent("llm.call.started", map[string]interface{}{
@@ -291,6 +293,7 @@ func (p *InstrumentedProvider) ChatStream(ctx context.Context, messages []llmtyp
 	if preview := lastUserMessagePreview(messages); preview != "" {
 		span.SetAttribute("message.preview", preview)
 	}
+	setInputMessages(span, messages)
 
 	// Record event: streaming started
 	span.AddEvent("stream.started", map[string]interface{}{
@@ -501,16 +504,9 @@ func (p *InstrumentedProvider) ChatStream(ctx context.Context, messages []llmtyp
 	return resp, nil
 }
 
-const maxPreviewRunes = 200
-
-// truncatePreview bounds content exported to observability backends.
-func truncatePreview(content string) string {
-	runes := []rune(content)
-	if len(runes) <= maxPreviewRunes {
-		return content
-	}
-	return string(runes[:maxPreviewRunes]) + "…"
-}
+// truncatePreview bounds content exported to observability backends; the
+// bound is observability.PreviewMaxChars.
+func truncatePreview(content string) string { return observability.TruncatePreview(content) }
 
 // lastUserMessagePreview returns a bounded preview of the last user message.
 // For multi-modal messages it concatenates text blocks, skipping image blocks.
@@ -520,18 +516,44 @@ func lastUserMessagePreview(messages []llmtypes.Message) string {
 		if m.Role != "user" {
 			continue
 		}
-		if m.Content != "" {
-			return truncatePreview(m.Content)
-		}
-		var parts []string
-		for _, b := range m.ContentBlocks {
-			if b.Type == "text" && b.Text != "" {
-				parts = append(parts, b.Text)
-			}
-		}
-		return truncatePreview(strings.Join(parts, " "))
+		return truncatePreview(messageText(m))
 	}
 	return ""
+}
+
+// messageText returns a message's text, joining text blocks of multi-modal
+// messages and skipping image blocks.
+func messageText(m llmtypes.Message) string {
+	if m.Content != "" {
+		return m.Content
+	}
+	var parts []string
+	for _, b := range m.ContentBlocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// setInputMessages records every message sent to the model as OpenInference
+// llm.input_messages attributes, which Phoenix renders as the span's chat
+// input. Each content and tool-argument value is bounded by truncatePreview.
+func setInputMessages(span *observability.Span, messages []llmtypes.Message) {
+	for i, m := range messages {
+		prefix := fmt.Sprintf("llm.input_messages.%d.message.", i)
+		span.SetAttribute(prefix+"role", m.Role)
+		if text := messageText(m); text != "" {
+			span.SetAttribute(prefix+"content", truncatePreview(text))
+		}
+		for j, tc := range m.ToolCalls {
+			tcPrefix := fmt.Sprintf("%stool_calls.%d.tool_call.", prefix, j)
+			span.SetAttribute(tcPrefix+"function.name", tc.Name)
+			if args, err := json.Marshal(tc.Input); err == nil {
+				span.SetAttribute(tcPrefix+"function.arguments", truncatePreview(string(args)))
+			}
+		}
+	}
 }
 
 // Ensure InstrumentedProvider implements LLMProvider interface

@@ -111,7 +111,7 @@ func translateAttrs(otelSpan oteltrace.Span, attrs map[string]interface{}) {
 					}
 				}
 			}
-		} else if !strings.HasPrefix(k, loomAttrPrefix) {
+		} else if !strings.HasPrefix(k, loomAttrPrefix) && !strings.HasPrefix(k, oiInputMessagesPrefix) {
 			otelKey = loomAttrPrefix + k
 		}
 		otelSpan.SetAttributes(toOTelAttr(otelKey, v))
@@ -165,6 +165,9 @@ const (
 	oiOutputValue   = "output.value"
 	oiOutputMIME    = "output.mime_type"
 	oiMIMETextPlain = "text/plain"
+	// oiInputMessagesPrefix keys (llm.input_messages.<i>.message.*) are
+	// exported unprefixed so Phoenix shows the full chat input.
+	oiInputMessagesPrefix = "llm.input_messages."
 )
 
 // openInferenceKindFor returns the OpenInference span kind for a Loom span name.

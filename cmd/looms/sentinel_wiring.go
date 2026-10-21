@@ -141,5 +141,5 @@ func newPhoenixReadTool(name string, cfg *Config) (shuttle.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return phoenixread.New(name, client, phoenixread.Config{Project: cfg.Sentinel.Phoenix.Project})
+	return phoenixread.New(name, client, phoenixread.Config{Project: cfg.Sentinel.Phoenix.Project, MaxValueChars: cfg.Sentinel.Phoenix.ReadMaxValueChars})
 }

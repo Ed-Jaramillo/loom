@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Phoenix span rendering (OpenInference)
+- OTLP export adds OpenInference `openinference.span.kind`, `input.value` and `output.value`, so Phoenix shows span kinds and the Input/Output columns. LLM spans also export every input message as `llm.input_messages.*`, and tool spans record argument and result previews.
+- `observability.preview_max_chars` sets the bound on each span preview (default 32768 runes; previously a fixed 200).
+- `sentinel.phoenix.read_max_value_chars` sets the per-value bound in `phoenix_list_spans` results (default 4000; previously 500).
+
 #### Phoenix assistant (PXI) integration for trace debugging
 - **`ask_phoenix_assistant` tool.** A Loom agent can put a question about one trace to Phoenix's assistant. Loom creates an ephemeral agent session over Phoenix's REST API (`/v1/agent_sessions`), sends the question headless with a trace context, reads the response stream, and answers every approval request PXI raises from a configured read-only allowlist, denying by default. The result carries PXI's text as untrusted data, the tools PXI ran with their approval decisions, summed token usage, PXI's own trace IDs, the stream's chunk types and warnings. Enabled per server with `sentinel.phoenix.assistant.enabled`; agents opt in by listing the tool in `spec.tools`. Package `pkg/sentinel/assistant`; example agent `examples/reference/agents/sentinel-pxi-probe.yaml`; guide `docs/guides/phoenix-assistant.md`.
 - **Narrow Phoenix REST client** (`pkg/observability/phoenix`) against the Phoenix 20.22.0 API: project lookup, span and trace listing with paging caps, agent-session create/get/messages/chat, typed 409 conflict errors, per-request timeouts, body byte caps, GET-only retries, and a parser for the Vercel AI UI message stream Phoenix emits. No generic request method, so a holder cannot reach Phoenix's DELETE, user or API-key endpoints.
