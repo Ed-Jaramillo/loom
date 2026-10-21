@@ -259,6 +259,14 @@ func TestExecute_TraceNotFoundCreatesNoSession(t *testing.T) {
 	assert.Equal(t, 0, f.sessions)
 }
 
+// secondTurnText is PXI's final text in the full-flow test: prose plus a
+// findings block citing one span that exists (…0002) and one that does not.
+const secondTurnText = "The call was truncated at max_tokens (span 0000000000000001).\n\n```json\n" +
+	`{"observed_facts":[{"statement":"output limit hit","span_ids":["0000000000000002"]},{"statement":"invented","span_ids":["deadbeefdeadbeef"]}],` +
+	`"candidate_explanations":[{"statement":"truncated call dispatched","confidence":"medium","supporting_span_ids":["0000000000000001"]}],` +
+	`"missing_information":["tool-call completeness at dispatch"],"suggested_remedies":[{"description":"raise max_tokens","kind":"config"}]}` +
+	"\n```"
+
 func TestExecute_FullFlowWithApprovals(t *testing.T) {
 	f, c := newFake(t)
 	f.turns = []scriptedTurn{
@@ -297,7 +305,7 @@ func TestExecute_FullFlowWithApprovals(t *testing.T) {
 			assistant: assistantMsg("assistant-2",
 				map[string]any{"type": "tool-execute_sql", "toolCallId": "c-sql", "state": "output-available", "input": map[string]any{"sql": "select 1"}, "output": []any{map[string]any{"n": 1}}},
 				map[string]any{"type": "tool-save_prompt", "toolCallId": "c-write", "state": "output-denied", "input": map[string]any{"name": "p"}},
-				map[string]any{"type": "text", "text": "The call was truncated at max_tokens (span 0000000000000001).", "state": "done"},
+				map[string]any{"type": "text", "text": secondTurnText, "state": "done"},
 			),
 		},
 	}
@@ -306,14 +314,19 @@ func TestExecute_FullFlowWithApprovals(t *testing.T) {
 		Model:        testModel,
 		ApproveTools: []string{"execute_sql"},
 		PayloadBytes: 64,
+		LoomVersion:  "1.4.0-test",
 	})
 	require.NoError(t, err)
 	tool.now = func() time.Time { return time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC) }
 
 	res, err := tool.Execute(context.Background(), map[string]interface{}{
-		"question": "Why did this run trip the breaker?",
-		"trace_id": strings.ToUpper(testTrace),
-		"span_id":  "0000000000000001",
+		"question":          "Why did this run trip the breaker?",
+		"trace_id":          strings.ToUpper(testTrace),
+		"span_id":           "0000000000000001",
+		"suspected_failure": "truncated tool call dispatched",
+		"loom_context": map[string]interface{}{
+			"effective_config": map[string]interface{}{"max_tokens": map[string]interface{}{"value": 4096, "source": "provider_default"}},
+		},
 	})
 	require.NoError(t, err)
 	require.True(t, res.Success, "%+v", res.Error)
@@ -332,7 +345,13 @@ func TestExecute_FullFlowWithApprovals(t *testing.T) {
 	}
 	assert.Equal(t, []string{"app", "trace", "span", "graphql", "web_access", "subagents"}, types)
 	assert.Equal(t, map[string]any{"type": "trace", "projectNodeId": testNodeID, "otelTraceId": testTrace}, ctxs[1])
-	assert.Equal(t, "Why did this run trip the breaker?", first["message"].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"])
+	sent := first["message"].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
+	assert.True(t, strings.HasPrefix(sent, "Why did this run trip the breaker?\n"), "question leads the message")
+	assert.Contains(t, sent, `"source": "provider_default"`, "loom_context reaches PXI")
+	assert.Contains(t, sent, `"suspected_failure": "truncated tool call dispatched"`)
+	assert.Contains(t, sent, `"loom_version": "1.4.0-test"`)
+	assert.Contains(t, sent, `"focus_span_id": "0000000000000001"`)
+	assert.Contains(t, sent, "observed_facts", "the response contract is requested")
 
 	// Approval continuation: allowlisted tool approved, the write denied.
 	second := f.chatBodies[1]
@@ -348,7 +367,23 @@ func TestExecute_FullFlowWithApprovals(t *testing.T) {
 	assert.Equal(t, map[string]bool{"c-sql": true, "c-write": false}, decisions)
 
 	// Answer assembled from the transcript.
-	assert.Equal(t, "Looking at the trace.\nThe call was truncated at max_tokens (span 0000000000000001).", ans.Answer)
+	assert.Equal(t, "Looking at the trace.\n"+secondTurnText, ans.Answer)
+
+	// Structured findings and citation check against the trace's spans
+	// (the fake trace has spans ...0001 to ...0003).
+	require.NotNil(t, ans.Findings)
+	require.Len(t, ans.Findings.ObservedFacts, 2)
+	assert.True(t, ans.Findings.ObservedFacts[0].Supported)
+	assert.False(t, ans.Findings.ObservedFacts[1].Supported)
+	assert.True(t, ans.Findings.CandidateExplanations[0].Supported)
+	assert.True(t, ans.Citations.Checked)
+	assert.Equal(t, 3, ans.Citations.SpansInTrace)
+	assert.Equal(t, []string{"0000000000000001", "0000000000000002"}, ans.Citations.VerifiedSpanIDs)
+	assert.Equal(t, []string{"deadbeefdeadbeef"}, ans.Citations.UnverifiedSpanIDs)
+	assert.Equal(t, 1, ans.Citations.UnsupportedFacts)
+	assert.Equal(t, []string{"deadbeefdeadbeef"}, res.Metadata["unverified_span_ids"])
+	assert.Equal(t, true, res.Metadata["findings_parsed"])
+	assert.Equal(t, "provider_default", ans.LoomContext["effective_config"].(map[string]interface{})["max_tokens"].(map[string]interface{})["source"])
 	assert.Equal(t, untrustedNote, ans.Note)
 	assert.Equal(t, testTrace, ans.TraceID)
 	assert.Equal(t, "0000000000000001", ans.SpanID)
@@ -466,4 +501,72 @@ func TestExecute_UnauthorizedIsReported(t *testing.T) {
 	assert.False(t, res.Success)
 	assert.Equal(t, "PHOENIX_PROJECT", res.Error.Code)
 	assert.NotContains(t, res.Error.Message, "wrong", "the key never appears in errors")
+}
+
+func TestExecute_SpanNotInTrace(t *testing.T) {
+	f, c := newFake(t)
+	tool, err := New(c, Config{Project: testProject, Model: testModel})
+	require.NoError(t, err)
+	res, err := tool.Execute(context.Background(), map[string]interface{}{
+		"question": "q", "trace_id": testTrace, "span_id": "00000000000000ff",
+	})
+	require.NoError(t, err)
+	assert.False(t, res.Success)
+	assert.Equal(t, "SPAN_NOT_FOUND", res.Error.Code)
+	assert.Equal(t, 0, f.sessions)
+}
+
+func TestExecute_InvalidLoomContext(t *testing.T) {
+	f, c := newFake(t)
+	tool, err := New(c, Config{Project: testProject, Model: testModel})
+	require.NoError(t, err)
+	res, err := tool.Execute(context.Background(), map[string]interface{}{
+		"question": "q", "trace_id": testTrace, "loom_context": "not json",
+	})
+	require.NoError(t, err)
+	assert.False(t, res.Success)
+	assert.Equal(t, "INVALID_PARAMS", res.Error.Code)
+	assert.Equal(t, 0, f.sessions)
+}
+
+func TestExecute_NoFindingsBlockIsWarning(t *testing.T) {
+	f, c := newFake(t)
+	f.turns = []scriptedTurn{{
+		stream:    sse(`{"type":"start","messageId":"a1"}`, `{"type":"finish"}`),
+		assistant: assistantMsg("a1", map[string]any{"type": "text", "text": "Plain prose citing 0000000000000003."}),
+	}}
+	tool, err := New(c, Config{Project: testProject, Model: testModel})
+	require.NoError(t, err)
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"question": "q", "trace_id": testTrace})
+	require.NoError(t, err)
+	require.True(t, res.Success)
+	ans := res.Data.(*Answer)
+	assert.Nil(t, ans.Findings)
+	assert.Contains(t, strings.Join(ans.Warnings, "|"), "no parseable findings block")
+	assert.Equal(t, []string{"0000000000000003"}, ans.Citations.VerifiedSpanIDs, "free-text citations are still checked")
+}
+
+// TestExecute_AssistantErrorWithoutAnswer mirrors the first live run on
+// pepm-0005: PXI's provider rejected its key, the stream carried only an
+// error chunk, and the transcript had no assistant text.
+func TestExecute_AssistantErrorWithoutAnswer(t *testing.T) {
+	f, c := newFake(t)
+	f.turns = []scriptedTurn{{
+		stream: sse(
+			`{"type":"start","messageId":"a1"}`,
+			`{"type":"error","errorText":"status_code: 401, model_name: claude-sonnet-5-5, body: {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}"}`,
+			`{"type":"finish","finishReason":"error"}`,
+		),
+		assistant: assistantMsg("a1"),
+	}}
+	tool, err := New(c, Config{Project: testProject, Model: testModel})
+	require.NoError(t, err)
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"question": "q", "trace_id": testTrace})
+	require.NoError(t, err)
+	require.False(t, res.Success)
+	assert.Equal(t, "PXI_ERROR", res.Error.Code)
+	assert.False(t, res.Error.Retryable, "the agent must not retry a rejected provider key")
+	assert.Contains(t, res.Error.Message, "invalid x-api-key")
+	assert.Equal(t, "session-1", res.Error.Details["phoenix_session_id"])
+	assert.Len(t, f.chatBodies, 1)
 }

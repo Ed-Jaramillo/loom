@@ -57,7 +57,7 @@ func TestRegisterYAMLBuiltinTools_DefaultMode_DropsAutoRegistered(t *testing.T) 
 	ag := agent.NewAgent(nil, nil)
 	cfg := newCfg("shell_execute", "http_request")
 
-	registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management")
+	registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management", nil)
 
 	assert.False(t, hasTool(ag, "shell_execute"),
 		"shell_execute must be skipped under default mode; the auto-registration path handles it")
@@ -76,7 +76,7 @@ func TestRegisterYAMLBuiltinTools_MinimalMode_HonoursYAMLShellExecute(t *testing
 	ag := agent.NewAgent(nil, nil)
 	cfg := newCfg("shell_execute", "http_request")
 
-	registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management")
+	registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management", nil)
 
 	assert.True(t, hasTool(ag, "shell_execute"),
 		"YAML-declared shell_execute MUST be registered under tools.minimal — this is the hot-reload regression fix")
@@ -92,7 +92,7 @@ func TestRegisterYAMLBuiltinTools_NoneMode_HonoursYAMLAutoTools(t *testing.T) {
 	ag := agent.NewAgent(nil, nil)
 	cfg := newCfg("shell_execute", "workspace", "tool_search", "http_request")
 
-	registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management")
+	registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management", nil)
 
 	// tool_search and workspace cannot be constructed via builtin.ByName
 	// (they need toolRegistry / artifactStore), so they fall through the
@@ -135,7 +135,7 @@ func TestRegisterYAMLBuiltinTools_OtherMechanismTools_AlwaysSkipped(t *testing.T
 			ag := agent.NewAgent(nil, nil)
 			cfg := newCfg(name)
 
-			registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management")
+			registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management", nil)
 
 			assert.False(t, hasTool(ag, name),
 				"%s must NOT be registered from the YAML path; it requires subsystem wiring", name)
@@ -154,12 +154,12 @@ func TestRegisterYAMLBuiltinTools_EmptyConfig_NoOp(t *testing.T) {
 	baseline := ag.ListTools()
 
 	// nil Tools
-	registerYAMLBuiltinTools(ag, &loomv1.AgentConfig{}, nil, zap.NewNop(), "  ", "agent_management")
+	registerYAMLBuiltinTools(ag, &loomv1.AgentConfig{}, nil, zap.NewNop(), "  ", "agent_management", nil)
 	assert.ElementsMatch(t, baseline, ag.ListTools(),
 		"no Tools section in YAML means no tools registered from the helper")
 
 	// empty Builtin slice
-	registerYAMLBuiltinTools(ag, newCfg(), nil, zap.NewNop(), "  ", "agent_management")
+	registerYAMLBuiltinTools(ag, newCfg(), nil, zap.NewNop(), "  ", "agent_management", nil)
 	assert.ElementsMatch(t, baseline, ag.ListTools(), "empty Builtin slice is a no-op")
 }
 
@@ -171,7 +171,7 @@ func TestRegisterYAMLBuiltinTools_UnknownTool_NotRegistered(t *testing.T) {
 	ag := agent.NewAgent(nil, nil)
 	cfg := newCfg("not_a_real_tool")
 
-	registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management")
+	registerYAMLBuiltinTools(ag, cfg, nil, zap.NewNop(), "  ", "agent_management", nil)
 
 	assert.False(t, hasTool(ag, "not_a_real_tool"))
 }

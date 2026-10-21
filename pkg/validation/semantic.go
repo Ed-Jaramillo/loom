@@ -360,6 +360,9 @@ func validateTools(tools []interface{}) ([]ValidationError, []ValidationWarning)
 		"manage_ephemeral_agents", // Sub-agent spawn / despawn
 		"task_board",              // Skill task board + kanban
 		"graph_memory",            // Salience-driven graph memory tool
+		"ask_phoenix_assistant",   // Phoenix assistant delegation (needs sentinel.phoenix.assistant.enabled)
+		"phoenix_list_traces",     // Read-only Phoenix traces (needs sentinel.phoenix.base_url)
+		"phoenix_list_spans",      // Read-only Phoenix spans (needs sentinel.phoenix.base_url)
 	}
 	for _, name := range frameworkTools {
 		knownTools[name] = true

@@ -101,6 +101,9 @@ func Names() []string {
 		// looms constructs it from sentinel.phoenix (see cmd/looms). Listed so
 		// YAML configs can declare it in tools.builtin.
 		"ask_phoenix_assistant",
+		// Read-only Phoenix tools, built by looms from sentinel.phoenix.
+		"phoenix_list_traces",
+		"phoenix_list_spans",
 	}
 }
 

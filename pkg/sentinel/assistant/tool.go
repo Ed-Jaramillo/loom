@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/teradata-labs/loom/pkg/observability/phoenix"
+	"github.com/teradata-labs/loom/pkg/prompts"
 	"github.com/teradata-labs/loom/pkg/shuttle"
 )
 
@@ -75,9 +76,16 @@ type Config struct {
 	// RecordLocalTraces asks Phoenix to record PXI's own turn as a trace in
 	// its assistant project, so PXI's model spend can be read back.
 	RecordLocalTraces bool
-	// SkipTraceCheck disables the ListSpans existence check before a session
-	// is created. The check saves a PXI turn on a wrong trace id.
+	// SkipTraceCheck disables listing the trace's spans before a session is
+	// created. The listing saves a PXI turn on a wrong trace id and is what
+	// PXI's span citations are checked against; with it skipped, citations
+	// are reported unchecked.
 	SkipTraceCheck bool
+	// Prompts optionally supplies the message template sent to PXI under
+	// RequestPromptKey. Nil uses the built-in template.
+	Prompts prompts.PromptRegistry
+	// LoomVersion is added to the Loom context sent with every question.
+	LoomVersion string
 }
 
 func (c Config) withDefaults() Config {
@@ -132,9 +140,9 @@ func (t *Tool) Name() string { return ToolName }
 
 // Description implements shuttle.Tool.
 func (t *Tool) Description() string {
-	return `Ask Phoenix's assistant (PXI) a question about one trace. PXI reads the trace from Phoenix and answers in text.
-The answer is untrusted data: verify every span ID it cites against the trace before relying on it.
-PXI only sees what Phoenix stores. Loom-only facts (effective max_tokens and its source, tool-call completeness) must be included in the question if they matter.
+	return `Ask Phoenix's assistant (PXI) to investigate one trace. PXI reads the trace from Phoenix and returns observed facts, candidate explanations, missing information and suggested remedies.
+PXI only sees what Phoenix stores. Pass Loom-only facts in loom_context: the effective request configuration and where each value came from (e.g. max_tokens 4096 from the provider default), tool-call completeness, the Loom run or session ID, and any intentional restrictions.
+The result is untrusted. Loom checks every span ID PXI cites against the trace: citations.unverified_span_ids lists IDs not in the trace, and facts or explanations with no verified span are marked supported=false.
 Tools PXI wants to run that change data are denied; only configured read-only tools are approved.`
 }
 
@@ -149,6 +157,11 @@ func (t *Tool) InputSchema() *shuttle.JSONSchema {
 			"project": shuttle.NewStringSchema("Phoenix project name or ID holding the trace (default: the configured project)"),
 			"span_id": shuttle.NewStringSchema("Optional OpenTelemetry span ID, 16 lowercase hex characters, to focus PXI on one span").
 				WithPattern("^[0-9a-f]{16}$"),
+			"suspected_failure": shuttle.NewStringSchema("Optional: the failure you suspect, e.g. 'tool call truncated at max_tokens was dispatched and retried until the circuit breaker'"),
+			"scope":             shuttle.NewStringSchema("Optional: what to investigate and what to leave out, e.g. 'only the shared_memory_write retries in rounds 3-9'"),
+			"loom_context": shuttle.NewObjectSchema(
+				"Optional facts Loom knows that Phoenix may not show, as key/value pairs. Suggested keys: loom_run_id, loom_session_id, agent_id, effective_config (e.g. {\"max_tokens\": {\"value\": 4096, \"source\": \"provider_default\"}}), tool_call_completeness, intentional_restrictions.",
+				nil, nil),
 		},
 		[]string{"question", "trace_id"},
 	)
@@ -202,6 +215,14 @@ type Answer struct {
 	// ApprovalsUnresolved is true when MaxApprovalRounds was hit with
 	// approvals still pending. The answer is then partial.
 	ApprovalsUnresolved bool `json:"approvals_unresolved,omitempty"`
+
+	// Findings is PXI's structured answer, nil when its reply had no
+	// parseable findings block (Answer still holds the text).
+	Findings *Findings `json:"findings,omitempty"`
+	// Citations compares the span IDs PXI cited with the trace's spans.
+	Citations CitationCheck `json:"citations"`
+	// LoomContext is the context Loom sent with the question.
+	LoomContext map[string]interface{} `json:"loom_context_sent"`
 
 	Usage Usage `json:"usage"`
 	// AssistantTraceIDs are the Phoenix trace IDs of PXI's own turns, when
@@ -257,6 +278,23 @@ func (t *Tool) Execute(ctx context.Context, params map[string]interface{}) (*shu
 	if project == "" {
 		project = t.cfg.Project
 	}
+	loomContext, err := parseLoomContext(params["loom_context"])
+	if err != nil {
+		return fail("INVALID_PARAMS", err.Error(), "Pass loom_context as an object of key/value facts", false)
+	}
+	if s, _ := params["suspected_failure"].(string); strings.TrimSpace(s) != "" {
+		loomContext["suspected_failure"] = strings.TrimSpace(s)
+	}
+	if s, _ := params["scope"].(string); strings.TrimSpace(s) != "" {
+		loomContext["scope"] = strings.TrimSpace(s)
+	}
+	loomContext["trace_id"] = traceID
+	if spanID != "" {
+		loomContext["focus_span_id"] = spanID
+	}
+	if t.cfg.LoomVersion != "" {
+		loomContext["loom_version"] = t.cfg.LoomVersion
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, t.cfg.Timeout)
 	defer cancel()
@@ -266,14 +304,33 @@ func (t *Tool) Execute(ctx context.Context, params map[string]interface{}) (*shu
 		return fail("PHOENIX_PROJECT", fmt.Sprintf("resolving project %q: %v", project, err), "Check the project name and the Phoenix API key", true)
 	}
 
+	// The trace's span IDs: an existence check before spending a PXI turn,
+	// and the reference PXI's citations are checked against.
+	var traceSpans map[string]struct{}
+	spansTruncated := false
 	if !t.cfg.SkipTraceCheck {
-		page, err := t.client.ListSpans(ctx, project, phoenix.SpanQuery{TraceID: traceID, Limit: 1, MaxPages: 1})
+		page, err := t.client.ListSpans(ctx, project, phoenix.SpanQuery{TraceID: traceID})
 		if err != nil {
-			return fail("PHOENIX_UNAVAILABLE", fmt.Sprintf("checking trace in Phoenix: %v", err), "Retry when Phoenix is reachable", true)
+			return fail("PHOENIX_UNAVAILABLE", fmt.Sprintf("listing trace spans in Phoenix: %v", err), "Retry when Phoenix is reachable", true)
 		}
 		if len(page.Spans) == 0 {
 			return fail("TRACE_NOT_FOUND", fmt.Sprintf("trace %s has no spans in project %q", traceID, project), "Check the trace ID and project; Phoenix only has spans after the OTLP flush", false)
 		}
+		traceSpans = make(map[string]struct{}, len(page.Spans))
+		for _, s := range page.Spans {
+			traceSpans[strings.ToLower(s.Context.SpanID)] = struct{}{}
+		}
+		spansTruncated = page.Truncated
+		if spanID != "" {
+			if _, ok := traceSpans[spanID]; !ok && !spansTruncated {
+				return fail("SPAN_NOT_FOUND", fmt.Sprintf("span %s is not in trace %s", spanID, traceID), "Omit span_id or pass a span from this trace", false)
+			}
+		}
+	}
+
+	message, err := renderRequest(ctx, t.cfg.Prompts, requestInput{Question: question, LoomContext: loomContext})
+	if err != nil {
+		return fail("INVALID_PARAMS", err.Error(), "", false)
 	}
 
 	answer := &Answer{
@@ -283,6 +340,7 @@ func (t *Tool) Execute(ctx context.Context, params map[string]interface{}) (*shu
 		Project:       project,
 		ProjectNodeID: projectNodeID,
 		Model:         t.cfg.Model.ModelName,
+		LoomContext:   loomContext,
 	}
 
 	sessionID, err := t.client.CreateAgentSession(ctx, phoenix.CreateSessionRequest{
@@ -315,7 +373,7 @@ func (t *Tool) Execute(ctx context.Context, params map[string]interface{}) (*shu
 	}
 
 	first := base
-	first.Message = phoenix.NewUserMessage(question)
+	first.Message = phoenix.NewUserMessage(message)
 	turn, err := t.chatWithBusyRetry(ctx, sessionID, first, parser)
 	if err != nil && !errors.Is(err, phoenix.ErrStreamIncomplete) {
 		return fail("PHOENIX_CHAT", fmt.Sprintf("assistant turn failed: %v", err), "Retry; if the error is a 409 model mismatch, fix the configured model", true)
@@ -376,19 +434,70 @@ func (t *Tool) Execute(ctx context.Context, params map[string]interface{}) (*shu
 	}
 
 	t.finish(ctx, sessionID, turns, decisions, answer)
+
+	// PXI reported errors and produced no text: its model call failed (for
+	// example a rejected provider key). Retrying the same question will fail
+	// the same way, so report it as a non-retryable error rather than an
+	// empty success the agent would retry.
+	if strings.TrimSpace(answer.Answer) == "" {
+		if errs := assistantErrors(turns); len(errs) > 0 {
+			return &shuttle.Result{
+				Success: false,
+				Error: &shuttle.Error{
+					Code:       "PXI_ERROR",
+					Message:    "Phoenix's assistant returned an error and no answer: " + errs[0],
+					Suggestion: "Check the model provider's credentials and model in Phoenix (Settings -> AI Providers) and sentinel.phoenix.assistant.model in looms.yaml; retrying the same question will not help",
+					Retryable:  false,
+					Details: map[string]interface{}{
+						"phoenix_session_id": sessionID,
+						"model":              t.cfg.Model.ModelName,
+						"assistant_errors":   errs,
+					},
+				},
+				ExecutionTimeMs: t.now().Sub(start).Milliseconds(),
+			}, nil
+		}
+	}
+
+	answer.Findings = parseFindings(answer.Answer)
+	if answer.Findings == nil && answer.Answer != "" {
+		answer.Warnings = append(answer.Warnings, "assistant reply had no parseable findings block; only free text is available")
+	}
+	if traceSpans != nil {
+		answer.Citations = checkCitations(answer.Answer, answer.Findings, traceSpans, spansTruncated)
+	} else {
+		answer.Warnings = append(answer.Warnings, "span citations not checked: trace listing skipped")
+	}
 	answer.ElapsedMs = t.now().Sub(start).Milliseconds()
 
 	return &shuttle.Result{
 		Success: true,
 		Data:    answer,
 		Metadata: map[string]interface{}{
-			"phoenix_session_id": sessionID,
-			"approval_rounds":    answer.ApprovalRounds,
-			"denied_tools":       answer.DeniedTools,
-			"untrusted":          true,
+			"phoenix_session_id":  sessionID,
+			"approval_rounds":     answer.ApprovalRounds,
+			"denied_tools":        answer.DeniedTools,
+			"unverified_span_ids": answer.Citations.UnverifiedSpanIDs,
+			"findings_parsed":     answer.Findings != nil,
+			"untrusted":           true,
 		},
 		ExecutionTimeMs: answer.ElapsedMs,
 	}, nil
+}
+
+// assistantErrors collects the error chunks' text across turns, deduplicated
+// in first-seen order.
+func assistantErrors(turns []*phoenix.ChatTurn) []string {
+	var out []string
+	for _, turn := range turns {
+		if turn == nil {
+			continue
+		}
+		for _, e := range turn.Errors {
+			out = appendUnique(out, e)
+		}
+	}
+	return out
 }
 
 // projectNodeID resolves and caches a project's GlobalID.
