@@ -172,7 +172,7 @@ func TestListTraces(t *testing.T) {
 	tool, err := New(ListTracesName, c, Config{Project: "loom-research"})
 	require.NoError(t, err)
 	res, err := tool.Execute(context.Background(), map[string]interface{}{
-		"since": "24h", "error_only": true, "limit": float64(500),
+		"since": "24h", "error_only": true, "limit": float64(500), "session_id": " sess_5f2f37ec ",
 	})
 	require.NoError(t, err)
 	require.True(t, res.Success, "%+v", res.Error)
@@ -181,6 +181,7 @@ func TestListTraces(t *testing.T) {
 	assert.Contains(t, q, "error=true")
 	assert.Contains(t, q, "limit=100", "limit is capped")
 	assert.Contains(t, q, "start_time=")
+	assert.Contains(t, q, "session_identifier=sess_5f2f37ec")
 	data := res.Data.(map[string]interface{})
 	rows := data["traces"].([]TraceSummary)
 	require.Len(t, rows, 2)

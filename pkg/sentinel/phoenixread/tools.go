@@ -149,7 +149,7 @@ func (t *listTraces) Name() string { return ListTracesName }
 
 func (t *listTraces) Description() string {
 	return `List recent traces in a Phoenix project, newest first. Returns trace IDs with start time, duration and token counts.
-Use it to find a trace to investigate; then read its spans with phoenix_list_spans. Read-only.`
+Filter by session_id to get a session's traces. Use it to find a trace to investigate; then read its spans with phoenix_list_spans. Read-only.`
 }
 
 func (t *listTraces) InputSchema() *shuttle.JSONSchema {
@@ -159,6 +159,7 @@ func (t *listTraces) InputSchema() *shuttle.JSONSchema {
 			"project":    shuttle.NewStringSchema("Phoenix project name or ID (default: the configured project)"),
 			"since":      shuttle.NewStringSchema("Only traces that started within this duration, e.g. \"1h\", \"24h\" (default: no lower bound)"),
 			"error_only": shuttle.NewBooleanSchema("Only traces with at least one error span"),
+			"session_id": shuttle.NewStringSchema("Only traces of this session: the session.id attribute value (e.g. \"sess_5f2f37ec\") or the session's Phoenix node ID"),
 			"limit":      shuttle.NewNumberSchema("Maximum traces to return (default 20, max 100)"),
 		},
 		nil,
@@ -187,6 +188,9 @@ func (t *listTraces) Execute(ctx context.Context, params map[string]interface{})
 	}
 	if b, ok := params["error_only"].(bool); ok && b {
 		q.Error = &b
+	}
+	if sid, _ := params["session_id"].(string); strings.TrimSpace(sid) != "" {
+		q.SessionIdentifier = strings.TrimSpace(sid)
 	}
 	project := t.project(params)
 	page, err := t.client.ListTraces(ctx, project, q)

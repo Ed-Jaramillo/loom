@@ -37,11 +37,19 @@ spec:
     phoenix_list_traces (error_only for failures) and ask which one to use, or
     pick the obvious match and say which.
 
+    Both tools take a project parameter that accepts a project name or a
+    project node ID, so pass phoenix.project_node_id as-is. For a question
+    about a session (a session.id such as sess_..., or phoenix.session_node_id
+    in context), first call phoenix_list_traces with session_id, then read each
+    trace's spans without a status_code filter; a session with no ERROR spans
+    still has traces.
+
     Read data only with the two tools:
     - phoenix_list_spans: one trace's spans, or one span by span_id. On large
       traces, filter by name (for example llm.completion,
       agent.tool_execution) or status_code ERROR instead of reading everything.
-    - phoenix_list_traces: recent traces in a project.
+    - phoenix_list_traces: recent traces in a project, or one session's
+      traces with session_id.
     LLM spans use OpenTelemetry names: gen_ai.usage.cost for cost in USD,
     gen_ai.usage.output_tokens, gen_ai.request.max_tokens and
     gen_ai.response.finish_reasons. Loom-specific attributes start with loom.
