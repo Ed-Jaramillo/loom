@@ -35,10 +35,10 @@ import (
 // agent's YAML but sentinel.phoenix.assistant.enabled is false.
 var errPhoenixAssistantDisabled = errors.New("sentinel.phoenix.assistant.enabled is false")
 
-// newPhoenixClient builds the narrow Phoenix REST client from
+// newSentinelPhoenixClient builds the narrow Phoenix REST client from
 // sentinel.phoenix. The API key is read from the named environment variable
 // and never logged. tracer may be nil.
-func newPhoenixClient(cfg *Config, tracer observability.Tracer) (*phoenix.Client, error) {
+func newSentinelPhoenixClient(cfg *Config, tracer observability.Tracer) (*phoenix.Client, error) {
 	if cfg == nil {
 		return nil, errors.New("server config is not loaded")
 	}
@@ -83,7 +83,7 @@ func newPhoenixAssistantTool(cfg *Config, promptRegistry prompts.PromptRegistry,
 	if !a.Enabled {
 		return nil, errPhoenixAssistantDisabled
 	}
-	client, err := newPhoenixClient(cfg, nil)
+	client, err := newSentinelPhoenixClient(cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -137,9 +137,9 @@ func isPhoenixReadTool(name string) bool {
 // newPhoenixReadTool builds a read-only Phoenix tool from sentinel.phoenix.
 // It needs base_url and the API key env var, not the assistant switch.
 func newPhoenixReadTool(name string, cfg *Config) (shuttle.Tool, error) {
-	client, err := newPhoenixClient(cfg, nil)
+	client, err := newSentinelPhoenixClient(cfg, nil)
 	if err != nil {
 		return nil, err
 	}
-	return phoenixread.New(name, client, phoenixread.Config{Project: cfg.Sentinel.Phoenix.Project})
+	return phoenixread.New(name, client, phoenixread.Config{Project: cfg.Sentinel.Phoenix.Project, MaxValueChars: cfg.Sentinel.Phoenix.ReadMaxValueChars})
 }
