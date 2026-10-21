@@ -207,7 +207,6 @@ func (t *WebSearchTool) InputSchema() *shuttle.JSONSchema {
 			"provider": shuttle.NewStringSchema(fmt.Sprintf("Search provider to use (default: %s)", defaultProvider)).
 				WithEnum(providerNames()...).
 				WithDefault(defaultProvider),
-			"api_key": shuttle.NewStringSchema("API key for the provider (not needed for duckduckgo)"),
 			"max_results": shuttle.NewNumberSchema("Maximum number of results to return (default: 10)").
 				WithDefault(10),
 			"search_lang": shuttle.NewStringSchema("Search language code (default: en)").
@@ -242,6 +241,9 @@ func (t *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 		provider = strings.ToLower(p)
 	}
 
+	// api_key is not advertised: a key the model passes as an argument is
+	// recorded in tool spans and session history. Programmatic callers that
+	// still send it are honoured.
 	apiKey, _ := params["api_key"].(string)
 
 	// FORCE TAVILY if API key is available (override LLM's provider choice)
@@ -279,7 +281,7 @@ func (t *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 			Error: &shuttle.Error{
 				Code:       "MISSING_API_KEY",
 				Message:    fmt.Sprintf("API key required for provider: %s", provider),
-				Suggestion: fmt.Sprintf("Set api_key parameter, configure via 'looms config set-key', or set %s environment variable. Or use duckduckgo which doesn't require an API key.", envVarName),
+				Suggestion: fmt.Sprintf("An operator must configure the key ('looms config set-key' or the %s environment variable); it cannot be passed as an argument. Or use duckduckgo, which doesn't require an API key.", envVarName),
 			},
 			ExecutionTimeMs: time.Since(start).Milliseconds(),
 		}, nil
