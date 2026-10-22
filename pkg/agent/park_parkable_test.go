@@ -26,8 +26,10 @@ import (
 
 // formTool is a fake ParkableQuestion tool.
 type formTool struct {
-	runs     atomic.Int64
-	okToPark bool
+	runs      atomic.Int64
+	okToPark  atomic.Bool
+	nilResult atomic.Bool
+	parkCalls atomic.Int64
 
 	gotInput  atomic.Value // map[string]interface{}
 	gotAnswer atomic.Value // string
@@ -45,17 +47,27 @@ func (t *formTool) Execute(ctx context.Context, params map[string]interface{}) (
 	t.runs.Add(1)
 	return &shuttle.Result{Success: true, Data: "executed"}, nil
 }
-func (t *formTool) ParkQuestion(input map[string]interface{}) (string, bool) {
-	if !t.okToPark {
+func (t *formTool) ParkQuestion(ctx context.Context, input map[string]interface{}) (string, bool) {
+	t.parkCalls.Add(1)
+	if !t.okToPark.Load() {
 		return "", false
 	}
 	title, _ := input["title"].(string)
 	return title, true
 }
-func (t *formTool) ParkAnswerResult(input map[string]interface{}, answer string) *shuttle.Result {
+func (t *formTool) ParkAnswerResult(ctx context.Context, input map[string]interface{}, answer string) *shuttle.Result {
+	if t.nilResult.Load() {
+		return nil
+	}
 	t.gotInput.Store(input)
 	t.gotAnswer.Store(answer)
 	return &shuttle.Result{Success: true, Data: map[string]interface{}{"status": "submitted", "echo": answer}}
+}
+
+func newFormTool(okToPark bool) *formTool {
+	t := &formTool{}
+	t.okToPark.Store(okToPark)
+	return t
 }
 
 func formScript(extra ...llmtypes.ToolCall) []mockLLMResponse {
@@ -88,7 +100,7 @@ func toolRow(t *testing.T, f *parkFixture, sessionID, callID string) Message {
 }
 
 func TestParkable_ParksAsQuestionWithoutExecuting(t *testing.T) {
-	ft := &formTool{okToPark: true}
+	ft := newFormTool(true)
 	f := newFormFixture(t, nil, ft, formScript())
 
 	_, err := f.ag.Chat(context.Background(), "s-pq", "go")
@@ -117,7 +129,7 @@ func TestParkable_ParksAsQuestionWithoutExecuting(t *testing.T) {
 }
 
 func TestParkable_NotOKRunsExecute(t *testing.T) {
-	ft := &formTool{okToPark: false}
+	ft := newFormTool(false)
 	f := newFormFixture(t, nil, ft, formScript())
 	resp, err := f.ag.Chat(context.Background(), "s-pq-no", "go")
 	if err != nil {
@@ -132,7 +144,7 @@ func TestParkable_NotOKRunsExecute(t *testing.T) {
 }
 
 func TestParkable_DenyIsNotParked(t *testing.T) {
-	ft := &formTool{okToPark: true}
+	ft := newFormTool(true)
 	f := newFormFixture(t, []shuttle.Hook{scopedDenyHook{tool: "form_tool"}}, ft, formScript())
 	resp, err := f.ag.Chat(context.Background(), "s-pq-deny", "go")
 	if err != nil {
@@ -161,7 +173,7 @@ func parkForm(t *testing.T, f *parkFixture, sid string) *shuttle.HumanRequest {
 }
 
 func TestParkable_ResumeApprovedBuildsResultFromAnswer(t *testing.T) {
-	ft := &formTool{okToPark: true}
+	ft := newFormTool(true)
 	f := newFormFixture(t, nil, ft, formScript())
 	hr := parkForm(t, f, "s-pq-ok")
 
@@ -193,7 +205,7 @@ func TestParkable_ResumeApprovedBuildsResultFromAnswer(t *testing.T) {
 }
 
 func TestParkable_ResumeRejected(t *testing.T) {
-	ft := &formTool{okToPark: true}
+	ft := newFormTool(true)
 	f := newFormFixture(t, nil, ft, formScript())
 	hr := parkForm(t, f, "s-pq-rej")
 
@@ -210,7 +222,7 @@ func TestParkable_ResumeRejected(t *testing.T) {
 }
 
 func TestParkable_ResumeEmptyAnswerIsMissing(t *testing.T) {
-	ft := &formTool{okToPark: true}
+	ft := newFormTool(true)
 	f := newFormFixture(t, nil, ft, formScript())
 	hr := parkForm(t, f, "s-pq-empty")
 
@@ -226,7 +238,7 @@ func TestParkable_ResumeEmptyAnswerIsMissing(t *testing.T) {
 }
 
 func TestParkable_MixedBatchWithApprovalItem(t *testing.T) {
-	ft := &formTool{okToPark: true}
+	ft := newFormTool(true)
 	script := formScript(llmtypes.ToolCall{ID: "c-write", Name: "export_csv", Input: map[string]interface{}{"v": "w"}})
 	f := newFormFixture(t, []shuttle.Hook{scopedAskHook{tool: "export_csv"}}, ft, script, "export_csv")
 
@@ -251,5 +263,154 @@ func TestParkable_MixedBatchWithApprovalItem(t *testing.T) {
 	}
 	if ft.runs.Load() != 0 {
 		t.Fatalf("form Execute ran")
+	}
+}
+
+// The park-time classification is recorded on the row and is the authority on
+// resume: a ParkQuestion that flips to ok=false afterwards (input re-decoded
+// from JSON, changed config, re-registered tool) must not run Execute or drop
+// the human's answer.
+func TestParkable_ResumeTrustsRecordedKindWhenClassifierFlipsToNotOK(t *testing.T) {
+	ft := newFormTool(true)
+	f := newFormFixture(t, nil, ft, formScript())
+	hr := parkForm(t, f, "s-pq-flip")
+
+	ft.okToPark.Store(false)
+	callsBefore := ft.parkCalls.Load()
+	if _, err := f.ag.ResumeChat(context.Background(), "s-pq-flip", ParkDecision{
+		RequestID: hr.ID, ItemIDs: paramKeys(hr), Approved: true,
+		Answers: map[string]string{"c-form": "the answer"},
+	}, nil); err != nil {
+		t.Fatalf("ResumeChat: %v", err)
+	}
+	if ft.runs.Load() != 0 {
+		t.Fatalf("Execute ran %d times on resume, want 0", ft.runs.Load())
+	}
+	if got, _ := ft.gotAnswer.Load().(string); got != "the answer" {
+		t.Fatalf("answer seen = %q, want the human's answer", got)
+	}
+	if ft.parkCalls.Load() != callsBefore {
+		t.Fatalf("ParkQuestion was re-evaluated on resume")
+	}
+	row := toolRow(t, f, "s-pq-flip", "c-form")
+	if !row.ToolResult.Success {
+		t.Fatalf("row = %#v", row.ToolResult)
+	}
+}
+
+// The reverse flip: a call parked as an approval must stay an approval even if
+// ParkQuestion now says ok; it must execute under the grant, not become
+// MISSING_ANSWER.
+func TestParkable_ResumeTrustsRecordedKindWhenClassifierFlipsToOK(t *testing.T) {
+	ft := newFormTool(false)
+	f := newFormFixture(t, []shuttle.Hook{scopedAskHook{tool: "form_tool"}}, ft, formScript())
+	hr := parkForm(t, f, "s-pq-flip2")
+	if hr.Kind != "approval" {
+		t.Fatalf("kind = %q, want approval", hr.Kind)
+	}
+
+	ft.okToPark.Store(true)
+	if _, err := f.ag.ResumeChat(context.Background(), "s-pq-flip2", ParkDecision{
+		RequestID: hr.ID, ItemIDs: paramKeys(hr), Approved: true,
+	}, nil); err != nil {
+		t.Fatalf("ResumeChat: %v", err)
+	}
+	if ft.runs.Load() != 1 {
+		t.Fatalf("Execute ran %d times, want 1 under the approval", ft.runs.Load())
+	}
+	row := toolRow(t, f, "s-pq-flip2", "c-form")
+	if !row.ToolResult.Success || row.ToolResult.Data != "executed" {
+		t.Fatalf("row = %#v", row.ToolResult)
+	}
+}
+
+func TestParkable_ResumeNilAnswerResultIsInternalError(t *testing.T) {
+	ft := newFormTool(true)
+	f := newFormFixture(t, nil, ft, formScript())
+	hr := parkForm(t, f, "s-pq-nil")
+
+	ft.nilResult.Store(true)
+	if _, err := f.ag.ResumeChat(context.Background(), "s-pq-nil", ParkDecision{
+		RequestID: hr.ID, ItemIDs: paramKeys(hr), Approved: true,
+		Answers: map[string]string{"c-form": "x"},
+	}, nil); err != nil {
+		t.Fatalf("ResumeChat: %v", err)
+	}
+	row := toolRow(t, f, "s-pq-nil", "c-form")
+	if row.ToolResult.Success || row.ToolResult.Error == nil || row.ToolResult.Error.Code != "internal_error" {
+		t.Fatalf("row = %#v", row.ToolResult)
+	}
+	if ft.runs.Load() != 0 {
+		t.Fatalf("Execute ran")
+	}
+}
+
+// A recorded question whose tool is no longer a ParkableQuestion synthesizes
+// an error instead of dispatching Execute.
+func TestParkable_ResumeToolNoLongerParkableSynthesizesError(t *testing.T) {
+	ft := newFormTool(true)
+	f := newFormFixture(t, nil, ft, formScript())
+	hr := parkForm(t, f, "s-pq-plain")
+
+	plain := &plainFormTool{}
+	f.ag.RegisterTool(plain)
+	if _, err := f.ag.ResumeChat(context.Background(), "s-pq-plain", ParkDecision{
+		RequestID: hr.ID, ItemIDs: paramKeys(hr), Approved: true,
+		Answers: map[string]string{"c-form": "x"},
+	}, nil); err != nil {
+		t.Fatalf("ResumeChat: %v", err)
+	}
+	if plain.runs.Load() != 0 {
+		t.Fatalf("Execute ran for a recorded question")
+	}
+	row := toolRow(t, f, "s-pq-plain", "c-form")
+	if row.ToolResult.Success || row.ToolResult.Error == nil || row.ToolResult.Error.Code != "internal_error" {
+		t.Fatalf("row = %#v", row.ToolResult)
+	}
+}
+
+// plainFormTool re-registers form_tool without the ParkableQuestion methods.
+type plainFormTool struct{ runs atomic.Int64 }
+
+func (t *plainFormTool) Name() string        { return "form_tool" }
+func (t *plainFormTool) Description() string { return "form tool" }
+func (t *plainFormTool) InputSchema() *shuttle.JSONSchema {
+	return &shuttle.JSONSchema{Type: "object"}
+}
+func (t *plainFormTool) Backend() string { return "" }
+func (t *plainFormTool) Execute(ctx context.Context, params map[string]interface{}) (*shuttle.Result, error) {
+	t.runs.Add(1)
+	return &shuttle.Result{Success: true, Data: "executed"}, nil
+}
+
+// An empty call ID cannot bind a card item, so the batch is not parked and
+// Execute runs inline.
+func TestParkable_EmptyCallIDRunsExecute(t *testing.T) {
+	ft := newFormTool(true)
+	script := []mockLLMResponse{
+		{content: "", toolCalls: []llmtypes.ToolCall{{ID: "", Name: "form_tool", Input: map[string]interface{}{"title": "t"}}}},
+		{content: "done"},
+	}
+	f := newFormFixture(t, nil, ft, script)
+	if _, err := f.ag.Chat(context.Background(), "s-pq-noid", "go"); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if ft.runs.Load() != 1 {
+		t.Fatalf("Execute ran %d times, want 1", ft.runs.Load())
+	}
+}
+
+// A ParkableQuestion under a policy Ask parks as a question only; there is no
+// separate approval item.
+func TestParkable_AskPolicyYieldsQuestionOnly(t *testing.T) {
+	ft := newFormTool(true)
+	f := newFormFixture(t, []shuttle.Hook{scopedAskHook{tool: "form_tool"}}, ft, formScript())
+	hr := parkForm(t, f, "s-pq-ask")
+	if hr.Kind != "question" {
+		t.Fatalf("kind = %q, want question", hr.Kind)
+	}
+	desc, _ := hr.Params["c-form"].(map[string]interface{})
+	if desc["kind"] != "question" {
+		t.Fatalf("descriptor = %#v", desc)
 	}
 }

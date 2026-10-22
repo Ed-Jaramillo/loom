@@ -597,7 +597,7 @@ func (a *Agent) ReleaseParkedHandles(sessionID string) {
 // parkQuestionOf classifies a call as a park question: a registered
 // contact_human (legacy; pq is nil) or a registered ParkableQuestion whose
 // ParkQuestion says ok. Policy (Preflight) is the caller's concern.
-func (a *Agent) parkQuestionOf(call ToolCall) (question string, pq shuttle.ParkableQuestion, ok bool) {
+func (a *Agent) parkQuestionOf(ctx Context, call ToolCall) (question string, pq shuttle.ParkableQuestion, ok bool) {
 	if call.Name == "contact_human" {
 		if _, found := a.tools.Get("contact_human"); !found {
 			return "", nil, false
@@ -612,19 +612,79 @@ func (a *Agent) parkQuestionOf(call ToolCall) (question string, pq shuttle.Parka
 	if !isPQ {
 		return "", nil, false
 	}
-	q, ok := p.ParkQuestion(call.Input)
+	spanCtx, span := ctx.Tracer().StartSpan(ctx, "agent.park_question")
+	defer ctx.Tracer().EndSpan(span)
+	span.SetAttribute("tool", call.Name)
+	q, ok := p.ParkQuestion(spanCtx, call.Input)
+	span.SetAttribute("parks", ok)
 	return q, p, ok
 }
 
-// isParkQuestion reproduces the pre-scan's question classification at
-// completion time: a registered contact_human or ParkableQuestion tool whose
-// preflight verdict is not Deny. A call that fails this — policy-denied, or
-// unregistered — was deliberately NOT a park item and must complete through
-// the normal dispatch ceremony (policy denial, "tool not found"), never
-// through answer synthesis: a caller-supplied answer for it would lift a Deny.
-func (a *Agent) isParkQuestion(ctx Context, call ToolCall) bool {
-	_, _, ok := a.parkQuestionOf(call)
-	return ok && a.executor.Preflight(ctx, call.Name, call.Input).Kind != shuttle.Deny
+// parkedAsQuestion reports whether a rowless call completes through answer
+// synthesis on resume. The kind recorded on the park row is the authority: a
+// ParkableQuestion's classification depends on its input and on tool state, so
+// re-asking ParkQuestion could flip between park and resume and either run
+// Execute under an approval nobody gave or discard the human's answer. A
+// policy Deny is re-checked fresh and is never lifted: a denied call
+// completes through the normal dispatch ceremony instead. A contact_human
+// that is no longer registered also dispatches ("tool not found").
+//
+// Rows written before kinds were recorded carry none; for those only a
+// registered contact_human is treated as a question, as before.
+func (a *Agent) parkedAsQuestion(ctx Context, call ToolCall, kinds map[string]string) bool {
+	switch kinds[call.ID] {
+	case "question":
+	case "":
+		if call.Name != "contact_human" {
+			return false
+		}
+	default:
+		return false
+	}
+	if call.Name == "contact_human" {
+		if _, found := a.tools.Get("contact_human"); !found {
+			return false
+		}
+	}
+	return a.executor.Preflight(ctx, call.Name, call.Input).Kind != shuttle.Deny
+}
+
+// parkedAnswerResult builds the result of a parked question from the human's
+// non-empty answer. Execute never runs here: the question was asked and
+// answered. A tool that is no longer a registered ParkableQuestion yields an
+// error result the model can see.
+func (a *Agent) parkedAnswerResult(ctx Context, call ToolCall, answer string) *shuttle.Result {
+	if call.Name == "contact_human" {
+		return &shuttle.Result{
+			Success: true,
+			Data: map[string]interface{}{
+				"response":     answer,
+				"responded_by": "user",
+				"status":       "responded",
+			},
+		}
+	}
+	var pq shuttle.ParkableQuestion
+	if t, found := a.tools.Get(call.Name); found {
+		pq, _ = t.(shuttle.ParkableQuestion)
+	}
+	if pq == nil {
+		return &shuttle.Result{Success: false, Error: &shuttle.Error{
+			Code:    "internal_error",
+			Message: "tool is no longer available to build a result for the human's answer",
+		}}
+	}
+	spanCtx, span := ctx.Tracer().StartSpan(ctx, "agent.park_answer_result")
+	defer ctx.Tracer().EndSpan(span)
+	span.SetAttribute("tool", call.Name)
+	res := pq.ParkAnswerResult(spanCtx, call.Input, answer)
+	if res == nil {
+		res = &shuttle.Result{Success: false, Error: &shuttle.Error{
+			Code:    "internal_error",
+			Message: "tool returned no result for the answer",
+		}}
+	}
+	return res
 }
 
 // parkItem is one batch call needing a human: an approval-gated call or a
@@ -651,7 +711,7 @@ func (a *Agent) maybeParkBatch(ctx Context, sess *Session, llmResp *LLMResponse,
 		if d.Kind == shuttle.Deny {
 			continue
 		}
-		if q, _, ok := a.parkQuestionOf(call); ok {
+		if q, _, ok := a.parkQuestionOf(ctx, call); ok {
 			items = append(items, parkItem{call: call, seq: i, kind: "question", question: q})
 			continue
 		}
@@ -1409,7 +1469,7 @@ func (a *Agent) completeParkedBatch(ctx Context, sess *Session, batch Message, r
 				Success: false,
 				Error:   &shuttle.Error{Code: "permission_denied", Message: reason, Retryable: false},
 			}, st)
-		case a.isParkQuestion(ctx, call):
+		case a.parkedAsQuestion(ctx, call, kinds):
 			answer, ok := decision.Answers[call.ID]
 			if !ok || answer == "" {
 				a.synthesizeParkedResult(ctx, sess, call, &shuttle.Result{
@@ -1418,22 +1478,7 @@ func (a *Agent) completeParkedBatch(ctx Context, sess *Session, batch Message, r
 				}, st)
 				continue
 			}
-			if _, pq, _ := a.parkQuestionOf(call); pq != nil {
-				res := pq.ParkAnswerResult(call.Input, answer)
-				if res == nil {
-					res = &shuttle.Result{Success: false, Error: &shuttle.Error{Code: "internal_error", Message: "tool returned no result for the answer"}}
-				}
-				a.synthesizeParkedResult(ctx, sess, call, res, st)
-				continue
-			}
-			a.synthesizeParkedResult(ctx, sess, call, &shuttle.Result{
-				Success: true,
-				Data: map[string]interface{}{
-					"response":     answer,
-					"responded_by": "user",
-					"status":       "responded",
-				},
-			}, st)
+			a.synthesizeParkedResult(ctx, sess, call, a.parkedAnswerResult(ctx, call, answer), st)
 		case granted[call.ID]:
 			a.dispatchOneCall(grantCtx, sess, call, seqOf[call.ID], st)
 		default:
