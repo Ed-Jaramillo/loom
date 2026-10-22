@@ -337,96 +337,80 @@ func (s *SessionStore) initSchema() error {
 		}
 	}
 
-	// Migration: Add agent_id, parent_session_id, session_context columns for cross-session memory
-	agentMemoryMigrations := map[string]string{
-		"agent_id":          "ALTER TABLE sessions ADD COLUMN agent_id TEXT",
-		"parent_session_id": "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
-		"session_context":   "ALTER TABLE messages ADD COLUMN session_context TEXT DEFAULT 'direct'",
-		"message_agent_id":  "ALTER TABLE messages ADD COLUMN agent_id TEXT", // Track which agent created each message
+	// Migration: add columns to tables created by older versions. Each entry
+	// names its table and column, so the existence check reads the real column
+	// even when two tables add the same column name (agent_id).
+	columnMigrations := []struct {
+		table, column, ddl, index string
+	}{
+		// Cross-session memory.
+		{"sessions", "agent_id", "ALTER TABLE sessions ADD COLUMN agent_id TEXT",
+			"CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id)"},
+		{"sessions", "parent_session_id", "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
+			"CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)"},
+		{"messages", "session_context", "ALTER TABLE messages ADD COLUMN session_context TEXT DEFAULT 'direct'",
+			"CREATE INDEX IF NOT EXISTS idx_messages_context ON messages(session_context)"},
+		// Which agent created each message.
+		{"messages", "agent_id", "ALTER TABLE messages ADD COLUMN agent_id TEXT",
+			"CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages(agent_id)"},
 		// Context-compilation columns (HLD §4.5): seq is the existing
 		// messages.id; evicted/folded are the write-once relief flags; turn is
 		// derived at insert. Legacy rows keep turn = 0 (uniformly old).
-		"evicted": "ALTER TABLE messages ADD COLUMN evicted INTEGER NOT NULL DEFAULT 0",
-		"folded":  "ALTER TABLE messages ADD COLUMN folded INTEGER NOT NULL DEFAULT 0",
-		"turn":    "ALTER TABLE messages ADD COLUMN turn INTEGER NOT NULL DEFAULT 0",
+		{"messages", "evicted", "ALTER TABLE messages ADD COLUMN evicted INTEGER NOT NULL DEFAULT 0", ""},
+		{"messages", "folded", "ALTER TABLE messages ADD COLUMN folded INTEGER NOT NULL DEFAULT 0", ""},
+		{"messages", "turn", "ALTER TABLE messages ADD COLUMN turn INTEGER NOT NULL DEFAULT 0", ""},
 		// Admission audit decision (TER-710): stamped on every persisted tool
 		// execution; without this guard an upgraded DB fails every
 		// tool_executions INSERT (the error is swallowed) and persistence
 		// silently stops.
-		"admission_decision": "ALTER TABLE tool_executions ADD COLUMN admission_decision TEXT",
+		{"tool_executions", "admission_decision", "ALTER TABLE tool_executions ADD COLUMN admission_decision TEXT", ""},
 		// Session ownership (MCP 2026-07-28 migration, Immediate brief Part A):
 		// pre-existing rows belong to the single-tenant default owner, matching
 		// the postgres 000006 convention. The sessions schema is owned by this
 		// initSchema (not the pkg/storage/sqlite migrator, whose 000001 only
 		// bootstraps): a numbered migration here would double-ALTER.
-		"user_id": "ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default-user'",
+		{"sessions", "user_id", "ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default-user'",
+			"CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)"},
 		// incarnation is the session's creation nonce (nanosecond, stamped
 		// once, never updated): created_at survives the round trip at SECOND
 		// resolution only, so the implicit-task epoch needs its own column to
 		// distinguish a same-second delete-and-recreate. NULL on legacy rows,
 		// which read back 0 and fall back to a CreatedAt-derived epoch.
-		"incarnation": "ALTER TABLE sessions ADD COLUMN incarnation INTEGER",
+		{"sessions", "incarnation", "ALTER TABLE sessions ADD COLUMN incarnation INTEGER", ""},
 		// task_id attributes a message to the task claimed when it was written,
 		// so a task's timeline can be reconstructed from the rows that already
-		// record the work. NULL for ordinary chat.
-		"task_id": "ALTER TABLE messages ADD COLUMN task_id TEXT",
+		// record the work. NULL for ordinary chat. The index is partial: task_id
+		// is NULL for most rows, so the NULL majority costs nothing to index.
+		{"messages", "task_id", "ALTER TABLE messages ADD COLUMN task_id TEXT",
+			"CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, timestamp) WHERE task_id IS NOT NULL"},
 	}
 
-	for columnName, migration := range agentMemoryMigrations {
-		// Check if column exists
-		var table string
-		switch columnName {
-		case "session_context", "message_agent_id", "evicted", "folded", "turn", "task_id":
-			table = "messages"
-		case "admission_decision":
-			table = "tool_executions"
-		default:
-			table = "sessions"
-		}
-
+	for _, m := range columnMigrations {
+		name := m.table + "." + m.column
 		// Validate table and column names are safe SQL identifiers to prevent injection.
 		// Parameterized queries cannot be used for SQLite pragma_table_info() arguments.
-		if !validSQLIdentifier.MatchString(table) || !validSQLIdentifier.MatchString(columnName) {
-			return fmt.Errorf("invalid SQL identifier: table=%q column=%q", table, columnName)
+		if !validSQLIdentifier.MatchString(m.table) || !validSQLIdentifier.MatchString(m.column) {
+			return fmt.Errorf("invalid SQL identifier: table=%q column=%q", m.table, m.column)
 		}
-		checkQuery := fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name='%s'", table, columnName) // #nosec G201 -- table and columnName validated above
+		checkQuery := fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name='%s'", m.table, m.column) // #nosec G201 -- table and column validated above
 		var count int
-		if err := s.db.QueryRowContext(ctx, checkQuery).Scan(&count); err == nil && count == 0 {
-			if _, err := s.db.ExecContext(ctx, migration); err != nil {
-				// Log but don't fail - column might already exist from another process
-				if span != nil {
-					span.RecordError(fmt.Errorf("migration warning (non-fatal) for %s: %w", columnName, err))
-				}
-			} else {
-				// Create corresponding index after successful column addition
-				var indexSQL string
-				switch columnName {
-				case "agent_id":
-					indexSQL = "CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id)"
-				case "parent_session_id":
-					indexSQL = "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)"
-				case "session_context":
-					indexSQL = "CREATE INDEX IF NOT EXISTS idx_messages_context ON messages(session_context)"
-				case "message_agent_id":
-					indexSQL = "CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages(agent_id)"
-				case "user_id":
-					indexSQL = "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)"
-				case "task_id":
-					// Partial: task_id is NULL for most rows, so the NULL
-					// majority costs nothing to index.
-					indexSQL = "CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, timestamp) WHERE task_id IS NOT NULL"
-				}
-				if indexSQL != "" {
-					if _, err := s.db.ExecContext(ctx, indexSQL); err != nil {
-						if span != nil {
-							span.RecordError(fmt.Errorf("migration warning (non-fatal) for %s index: %w", columnName, err))
-						}
-					}
-				}
-				if span != nil {
-					span.SetAttribute(fmt.Sprintf("migration_applied_%s", columnName), "true")
-				}
+		if err := s.db.QueryRowContext(ctx, checkQuery).Scan(&count); err != nil || count > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, m.ddl); err != nil {
+			// Log but don't fail - column might already exist from another process
+			if span != nil {
+				span.RecordError(fmt.Errorf("migration warning (non-fatal) for %s: %w", name, err))
 			}
+			continue
+		}
+		if m.index != "" {
+			if _, err := s.db.ExecContext(ctx, m.index); err != nil && span != nil {
+				span.RecordError(fmt.Errorf("migration warning (non-fatal) for %s index: %w", name, err))
+			}
+		}
+		if span != nil {
+			span.SetAttribute("migration_applied_"+m.table+"_"+m.column, "true")
 		}
 	}
 
