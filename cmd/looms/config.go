@@ -2132,7 +2132,8 @@ llm:
   # litellm_api_key: set via keyring (looms config set-key litellm_api_key)
 
   # Common generation parameters (apply to all providers)
-  temperature: 1.0
+  # temperature: omit to use each model's default. Some Bedrock models
+  # (OpenAI's) reject the field, and Loom leaves it out when unset.
   # max_tokens: omit to use the model's output limit from the catalog
   # (4096 for unlisted models). On Bedrock, max_tokens counts against the
   # tokens-per-minute quota when a request starts; set it lower if you hit

@@ -117,9 +117,8 @@ type FactoryConfig struct {
 // supply real values via pod env vars). These are expanded eagerly so that
 // every factory-created provider sees the resolved value.
 func NewProviderFactory(config FactoryConfig) *ProviderFactory {
-	if config.Temperature == 0 {
-		config.Temperature = 1.0
-	}
+	// Temperature 0 means not configured: each provider applies its own
+	// default, and Bedrock leaves the field out (some models reject it).
 
 	// Expand ${VAR} references in all credential/endpoint fields so the
 	// factory code paths that check `if field == ""` see the resolved value

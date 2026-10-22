@@ -5,9 +5,11 @@
 package factory
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestResolveMaxOutput exercises the precedence rules for the output token cap
@@ -131,4 +133,20 @@ func TestResolveMaxOutput(t *testing.T) {
 			assert.Equal(t, got, ResolveMaxOutput(tt.configuredMax, tt.provider, tt.model))
 		})
 	}
+}
+
+// The factory backs runtime model switching; an unset temperature must reach
+// the provider as 0 so Bedrock leaves it out (gpt-6-astra rejects it).
+func TestNewProviderFactory_LeavesUnsetTemperatureUnset(t *testing.T) {
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "test-token-not-real")
+	f := NewProviderFactory(FactoryConfig{DefaultProvider: "bedrock", BedrockRegion: "us-west-2"})
+	assert.Equal(t, 0.0, f.config.Temperature)
+
+	p, err := f.CreateProvider("bedrock", "us.openai.gpt-6-astra")
+	require.NoError(t, err)
+	ip, ok := p.(interface {
+		InvocationParameters(context.Context) map[string]interface{}
+	})
+	require.True(t, ok, "bedrock provider reports its invocation parameters")
+	assert.NotContains(t, ip.InvocationParameters(context.Background()), "temperature")
 }

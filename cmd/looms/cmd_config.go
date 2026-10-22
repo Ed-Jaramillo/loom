@@ -503,8 +503,7 @@ llm:
 `
 	}
 
-	config += `  temperature: 1.0
-  max_tokens: 4096
+	config += `  max_tokens: 4096
   timeout_seconds: 60
 
 database:
