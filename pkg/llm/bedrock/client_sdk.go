@@ -71,9 +71,7 @@ func NewSDKClient(cfg Config) (*SDKClient, error) {
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = DefaultBedrockMaxTokens
 	}
-	if cfg.Temperature == 0 {
-		cfg.Temperature = DefaultBedrockTemperature
-	}
+	// Temperature 0 means not configured; requests leave it out.
 
 	// Build AWS config for Bedrock.
 	// Bearer token is highest priority — skip SigV4 credential loading entirely.
@@ -308,7 +306,7 @@ func (c *SDKClient) InvocationParameters(ctx context.Context) map[string]interfa
 	params := map[string]interface{}{"max_tokens": c.maxTokens}
 	if c.thinkingEnabled(ctx) {
 		params["thinking"] = true
-	} else {
+	} else if c.temperature != 0 {
 		params["temperature"] = c.temperature
 	}
 	return params
@@ -327,7 +325,7 @@ func (c *SDKClient) thinkingEnabled(ctx context.Context) bool {
 // off. Omitting the field takes the API default, which is the only value
 // thinking accepts.
 func (c *SDKClient) temperatureParam(ctx context.Context) param.Opt[float64] {
-	if c.thinkingEnabled(ctx) {
+	if c.thinkingEnabled(ctx) || c.temperature == 0 {
 		return param.Opt[float64]{}
 	}
 	return anthropic.Float(c.temperature)

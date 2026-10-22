@@ -920,7 +920,7 @@ func TestConfig_Defaults(t *testing.T) {
 		assert.Equal(t, "us-west-2", client.region, "Should default to us-west-2")
 		assert.Equal(t, "us.anthropic.claude-sonnet-4-5-20250929-v1:0", client.modelID, "Should use default model")
 		assert.Equal(t, 4096, client.maxTokens, "Should default to 4096 tokens")
-		assert.Equal(t, 1.0, client.temperature, "Should default to 1.0 temperature")
+		assert.Equal(t, 0.0, client.temperature, "Unset temperature stays 0 and is left out of requests")
 	}
 }
 

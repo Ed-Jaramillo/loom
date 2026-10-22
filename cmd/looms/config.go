@@ -1285,7 +1285,9 @@ func setDefaults() {
 	viper.SetDefault("llm.mistral_model", "mistral-large-latest")
 	viper.SetDefault("llm.gemini_model", "gemini-3-flash-preview")
 	viper.SetDefault("llm.huggingface_model", "meta-llama/Meta-Llama-3.1-70B-Instruct")
-	viper.SetDefault("llm.temperature", 1.0)
+	// 0 = not configured: each provider applies its own default, and Bedrock
+	// leaves the field out of the request.
+	viper.SetDefault("llm.temperature", 0)
 	// 0 = use the model's output limit from the catalog (pkg/llm/catalog),
 	// falling back to 4096 for models the catalog does not list.
 	viper.SetDefault("llm.max_tokens", 0)

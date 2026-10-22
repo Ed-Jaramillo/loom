@@ -319,7 +319,11 @@ func runConfigShow(cmd *cobra.Command, args []string) {
 			fmt.Printf("  API Key: (not set)\n")
 		}
 	}
-	fmt.Printf("  Temperature: %.1f\n", config.LLM.Temperature)
+	if config.LLM.Temperature > 0 {
+		fmt.Printf("  Temperature: %.1f\n", config.LLM.Temperature)
+	} else {
+		fmt.Printf("  Temperature: (model default)\n")
+	}
 	if config.LLM.MaxTokens > 0 {
 		fmt.Printf("  Max Tokens: %d\n", config.LLM.MaxTokens)
 	} else {

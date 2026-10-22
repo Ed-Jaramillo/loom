@@ -49,7 +49,8 @@ agent:
 				// Check defaults
 				// Unset max_tokens stays 0: providers resolve it to the model's catalog limit.
 				assert.Equal(t, int32(0), config.Llm.MaxTokens)
-				assert.Equal(t, float32(0.7), config.Llm.Temperature)
+				// Unset temperature stays 0: the server or provider default applies.
+				assert.Equal(t, float32(0), config.Llm.Temperature)
 			},
 		},
 		{

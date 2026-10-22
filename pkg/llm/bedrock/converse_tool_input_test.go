@@ -14,6 +14,7 @@
 package bedrock
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -73,4 +74,16 @@ func TestToolUseInputToMap_NonObjectInputDegradesToEmpty(t *testing.T) {
 	got := toolUseInputToMap(doc)
 	require.NotNil(t, got)
 	assert.Empty(t, got)
+}
+
+func TestConverseInferenceConfig_TemperatureOnlyWhenConfigured(t *testing.T) {
+	unset := (&Client{maxTokens: 100}).converseInferenceConfig()
+	assert.Nil(t, unset.Temperature, "an unset temperature is left out; some models reject the field")
+	assert.Equal(t, int32(100), *unset.MaxTokens)
+
+	set := (&Client{maxTokens: 100, temperature: 0.3}).converseInferenceConfig()
+	require.NotNil(t, set.Temperature)
+	assert.InDelta(t, 0.3, *set.Temperature, 1e-6)
+
+	assert.NotContains(t, (&Client{maxTokens: 100}).InvocationParameters(context.Background()), "temperature")
 }

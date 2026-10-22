@@ -75,43 +75,81 @@ func pingProvider(ctx context.Context, provider types.LLMProvider) error {
 // Called during server startup to ensure all providers are reachable before serving
 // requests. Returns an error if any provider fails the health check.
 func ValidateProviders(ctx context.Context, agents map[string]*agent.Agent) error {
+	failed, err := CheckProviders(ctx, agents)
+	if err != nil {
+		return err
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(failed))
+	for _, f := range failed {
+		lines = append(lines, f.Error())
+	}
+	sort.Strings(lines)
+	return fmt.Errorf("LLM provider preflight check failed:\n  %s", strings.Join(lines, "\n  "))
+}
+
+// ProviderFailure is one LLM provider that failed its preflight ping, with
+// the IDs of the agents that use it.
+type ProviderFailure struct {
+	Provider string // "name/model"
+	AgentIDs []string
+	Err      error
+}
+
+func (f ProviderFailure) Error() string {
+	return fmt.Sprintf("%s (used by: %s): %v", f.Provider, strings.Join(f.AgentIDs, ", "), f.Err)
+}
+
+// CheckProviders pings each distinct provider the agents use, once, and
+// returns the ones that failed. It returns an error only when no agent has a
+// provider, so a caller can keep serving the agents whose providers work.
+func CheckProviders(ctx context.Context, agents map[string]*agent.Agent) ([]ProviderFailure, error) {
 	unique := collectUniqueProviders(agents)
 	if len(unique) == 0 {
-		return fmt.Errorf("no LLM providers configured")
+		return nil, fmt.Errorf("no LLM providers configured")
 	}
 
 	var (
 		mu       sync.Mutex
-		failures []string
+		failures []ProviderFailure
 	)
-
 	g, gCtx := errgroup.WithContext(ctx)
 	for key, entry := range unique {
 		g.Go(func() error {
 			checkCtx, cancel := context.WithTimeout(gCtx, 10*time.Second)
 			defer cancel()
-
-			err := pingProvider(checkCtx, entry.provider)
-			if err != nil {
-				agentList := entry.agents
-				sort.Strings(agentList)
+			if err := pingProvider(checkCtx, entry.provider); err != nil {
+				ids := append([]string(nil), entry.agents...)
+				sort.Strings(ids)
 				mu.Lock()
-				failures = append(failures, fmt.Sprintf("%s (used by: %s): %v",
-					key, strings.Join(agentList, ", "), err))
+				failures = append(failures, ProviderFailure{Provider: key, AgentIDs: ids, Err: err})
 				mu.Unlock()
 			}
 			return nil // don't abort other checks on individual failure
 		})
 	}
-
 	if err := g.Wait(); err != nil {
-		return err
+		return nil, err
 	}
+	sort.Slice(failures, func(i, j int) bool { return failures[i].Provider < failures[j].Provider })
+	return failures, nil
+}
 
-	if len(failures) > 0 {
-		sort.Strings(failures)
-		return fmt.Errorf("LLM provider preflight check failed:\n  %s",
-			strings.Join(failures, "\n  "))
+// AgentsFailingPreflight returns the IDs of agents with at least one failed
+// provider (any role), sorted.
+func AgentsFailingPreflight(failures []ProviderFailure) []string {
+	seen := map[string]bool{}
+	var ids []string
+	for _, f := range failures {
+		for _, id := range f.AgentIDs {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
 	}
-	return nil
+	sort.Strings(ids)
+	return ids
 }

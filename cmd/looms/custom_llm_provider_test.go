@@ -74,3 +74,32 @@ func TestBuildRateLimiterConfigDefaults(t *testing.T) {
 	assert.Equal(t, 100.0, custom.RequestsPerSecond)
 	assert.Equal(t, int64(1_200_000), custom.TokensPerMinute)
 }
+
+// Startup and hot reload both build an agent's provider with
+// agentLLMProviderFor, so a model named in an agent's YAML is the one used.
+func TestAgentLLMProviderFor(t *testing.T) {
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "test-token-not-real")
+	serverDefault := &stubDefaultLLM{}
+	serverConfig := &Config{}
+	serverConfig.LLM.BedrockRegion = "us-west-2"
+
+	got, err := agentLLMProviderFor(nil, serverDefault, serverConfig, zap.NewNop())
+	require.NoError(t, err)
+	assert.Same(t, serverDefault, got, "no llm block: the server default")
+
+	got, err = agentLLMProviderFor(&loomv1.LLMConfig{}, serverDefault, serverConfig, zap.NewNop())
+	require.NoError(t, err)
+	assert.Same(t, serverDefault, got, "an llm block without a provider: the server default")
+
+	got, err = agentLLMProviderFor(&loomv1.LLMConfig{Provider: "bedrock", Model: "us.openai.gpt-6-astra"}, serverDefault, serverConfig, zap.NewNop())
+	require.NoError(t, err)
+	assert.Equal(t, "us.openai.gpt-6-astra", got.Model(), "the agent's own model")
+
+	_, err = agentLLMProviderFor(&loomv1.LLMConfig{Provider: "no-such-provider", Model: "x"}, serverDefault, serverConfig, zap.NewNop())
+	assert.Error(t, err, "a provider that can't be built is an error, not a silent fallback")
+}
+
+type stubDefaultLLM struct{ agent.LLMProvider }
+
+func (*stubDefaultLLM) Name() string  { return "stub" }
+func (*stubDefaultLLM) Model() string { return "stub-default" }

@@ -86,10 +86,9 @@ type Config struct {
 //   - AWS_DEFAULT_REGION / LOOM_LLM_BEDROCK_REGION
 const (
 	// DefaultBedrockModelID uses Claude Sonnet 4.5 with cross-region inference profile (us.* prefix)
-	DefaultBedrockModelID     = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-	DefaultBedrockRegion      = "us-west-2"
-	DefaultBedrockMaxTokens   = 4096
-	DefaultBedrockTemperature = 1.0
+	DefaultBedrockModelID   = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+	DefaultBedrockRegion    = "us-west-2"
+	DefaultBedrockMaxTokens = 4096
 )
 
 // NewClient creates a new Bedrock client.
@@ -116,9 +115,8 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = DefaultBedrockMaxTokens
 	}
-	if cfg.Temperature == 0 {
-		cfg.Temperature = DefaultBedrockTemperature
-	}
+	// Temperature 0 means not configured: requests leave it out and the model
+	// uses its own default. Some models (OpenAI's on Bedrock) reject the field.
 
 	// Build AWS config.
 	// Bearer token is highest priority — skip SigV4 credential loading entirely.
@@ -224,7 +222,11 @@ func (c *Client) Name() string {
 // InvocationParameters reports the max_tokens and temperature every request
 // carries.
 func (c *Client) InvocationParameters(_ context.Context) map[string]interface{} {
-	return map[string]interface{}{"max_tokens": c.maxTokens, "temperature": c.temperature}
+	params := map[string]interface{}{"max_tokens": c.maxTokens}
+	if c.temperature != 0 {
+		params["temperature"] = c.temperature
+	}
+	return params
 }
 
 // Model returns the model identifier.
@@ -253,8 +255,10 @@ func (c *Client) Chat(ctx context.Context, messages []llmtypes.Message, tools []
 	request := map[string]interface{}{
 		"anthropic_version": "bedrock-2023-05-31",
 		"max_tokens":        c.maxTokens,
-		"temperature":       c.temperature,
 		"messages":          apiMessages,
+	}
+	if c.temperature != 0 {
+		request["temperature"] = c.temperature
 	}
 
 	// Add system prompt if present (Anthropic Messages API requires separate system field)
@@ -355,8 +359,10 @@ func (c *Client) chatStreamDisabled(ctx context.Context, messages []llmtypes.Mes
 	request := map[string]interface{}{
 		"anthropic_version": "bedrock-2023-05-31",
 		"max_tokens":        c.maxTokens,
-		"temperature":       c.temperature,
 		"messages":          apiMessages,
+	}
+	if c.temperature != 0 {
+		request["temperature"] = c.temperature
 	}
 
 	// Add system prompt if present (Anthropic Messages API requires separate system field)

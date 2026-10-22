@@ -182,3 +182,31 @@ func TestMultiAgentServer_GetHealth_UsesHealthCheckerWhenAvailable(t *testing.T)
 	assert.Equal(t, int64(0), llm.calls.Load(), "Chat should not be called when HealthCheck is available")
 	assert.Equal(t, int64(1), llm.healthCalls.Load(), "HealthCheck should be invoked exactly once")
 }
+
+func TestCheckProviders_ReportsOnlyTheAgentsWhoseProviderFails(t *testing.T) {
+	good := &countingLLM{name: "bedrock", model: "claude"}
+	bad := &countingLLM{name: "bedrock", model: "gpt-6-astra", err: errors.New("temperature not supported")}
+	agents := map[string]*agent.Agent{
+		"ok-1": agent.NewAgent(&mockBackend{}, good),
+		"ok-2": agent.NewAgent(&mockBackend{}, good),
+		"bad":  agent.NewAgent(&mockBackend{}, bad),
+	}
+
+	failures, err := CheckProviders(context.Background(), agents)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	assert.Equal(t, "bedrock/gpt-6-astra", failures[0].Provider)
+	assert.ErrorContains(t, failures[0].Err, "temperature")
+	assert.Equal(t, []string{"bad"}, AgentsFailingPreflight(failures))
+	assert.Equal(t, int64(1), good.calls.Load(), "a shared provider is still pinged once")
+
+	assert.ErrorContains(t, ValidateProviders(context.Background(), agents), "bedrock/gpt-6-astra (used by: bad)")
+}
+
+func TestAgentsFailingPreflight_DedupesAcrossProviders(t *testing.T) {
+	got := AgentsFailingPreflight([]ProviderFailure{
+		{Provider: "p1", AgentIDs: []string{"b", "a"}},
+		{Provider: "p2", AgentIDs: []string{"a"}},
+	})
+	assert.Equal(t, []string{"a", "b"}, got)
+}

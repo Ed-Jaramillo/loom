@@ -876,6 +876,27 @@ func defaultModelForLLM(llmCfg LLMConfig, provider string) string {
 	}
 }
 
+// agentLLMProviderFor returns the provider an agent's own llm block names, or
+// serverDefault when the agent has none. Startup and hot reload both use it, so
+// a model change in an agent's YAML takes effect without a restart.
+func agentLLMProviderFor(agentLLM *loomv1.LLMConfig, serverDefault agent.LLMProvider, config *Config, logger *zap.Logger) (agent.LLMProvider, error) {
+	if agentLLM == nil || agentLLM.Provider == "" {
+		logger.Info("    Using server default LLM")
+		return serverDefault, nil
+	}
+	logger.Info("    Agent has custom LLM configuration",
+		zap.String("provider", agentLLM.Provider),
+		zap.String("model", agentLLM.Model))
+	p, err := createLLMProviderFromProtoConfig(agentLLM, config, logger)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("    Using custom LLM",
+		zap.String("provider", agentLLM.Provider),
+		zap.String("model", agentLLM.Model))
+	return p, nil
+}
+
 // createLLMProviderFromProtoConfig creates an LLM provider from proto LLMConfig.
 // Uses server config for credentials and agent config for provider/model overrides.
 func createLLMProviderFromProtoConfig(protoConfig *loomv1.LLMConfig, serverConfig *Config, logger *zap.Logger) (agent.LLMProvider, error) {
@@ -2055,26 +2076,12 @@ func runServe(cmd *cobra.Command, args []string) {
 				agentOpts = append(agentOpts, agent.WithAdmissionHooks(admissionChain))
 				agentOpts = append(agentOpts, agent.WithIdentityResolver(postgres.UserIDFromContext))
 
-				// Determine LLM provider for this agent
-				// If agent has specific LLM config, use it; otherwise use server default
-				agentLLMProvider := llmProvider
-				if cfg.Llm != nil && cfg.Llm.Provider != "" {
-					logger.Info("    Agent has custom LLM configuration",
-						zap.String("provider", cfg.Llm.Provider),
-						zap.String("model", cfg.Llm.Model))
-					customLLM, err := createLLMProviderFromProtoConfig(cfg.Llm, config, logger)
-					if err != nil {
-						logger.Warn("    Failed to create custom LLM provider, using server default",
-							zap.Error(err))
-						// Fall back to server default LLM
-					} else {
-						agentLLMProvider = customLLM
-						logger.Info("    Using custom LLM",
-							zap.String("provider", cfg.Llm.Provider),
-							zap.String("model", cfg.Llm.Model))
-					}
-				} else {
-					logger.Info("    Using server default LLM")
+				// The agent's own llm block if it has one, else the server default.
+				agentLLMProvider, err := agentLLMProviderFor(cfg.Llm, llmProvider, config, logger)
+				if err != nil {
+					logger.Warn("    Failed to create custom LLM provider, using server default",
+						zap.Error(err))
+					agentLLMProvider = llmProvider
 				}
 
 				// Wrap LLM provider with instrumentation for observability
@@ -3410,7 +3417,10 @@ func runServe(cmd *cobra.Command, args []string) {
 			// reload-local variable keeps the shared llmProvider unwrapped:
 			// assigning the wrapper back to it made every later reload and
 			// every later use of llmProvider see an agent-role wrapper.
-			reloadLLM := llmProvider
+			reloadLLM, err := agentLLMProviderFor(agentConfig.Llm, llmProvider, config, logger)
+			if err != nil {
+				return fmt.Errorf("agent %s: build LLM provider: %w", name, err)
+			}
 			if tracer != nil {
 				reloadLLM = llm.NewInstrumentedProvider(reloadLLM, tracer, llm.WithRole(llm.RoleAgent))
 			}
@@ -3614,11 +3624,50 @@ func runServe(cmd *cobra.Command, args []string) {
 		preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer preflightCancel()
 
-		if err := server.ValidateProviders(preflightCtx, agents); err != nil {
+		failures, err := server.CheckProviders(preflightCtx, agents)
+		if err != nil {
 			logger.Fatal("LLM provider preflight check failed", zap.Error(err))
-		} else {
+		}
+		failedAgents := server.AgentsFailingPreflight(failures)
+		switch {
+		case len(failures) == 0:
 			logger.Info("All LLM provider preflight checks passed",
 				zap.Int("agents_checked", len(agents)))
+		case len(failedAgents) == len(agents):
+			// Nothing could serve a request: most likely the server's own
+			// credentials or default model are wrong.
+			logger.Fatal("LLM provider preflight check failed",
+				zap.Error(server.ValidateProviders(preflightCtx, agents)))
+		default:
+			// One agent's bad model must not take the others down. Remove the
+			// failing agents from the server; fixing an agent's YAML re-adds
+			// it through hot reload.
+			for _, f := range failures {
+				logger.Error("LLM provider preflight check failed; disabling the agents that use it",
+					zap.String("provider", f.Provider),
+					zap.Strings("agents", f.AgentIDs),
+					zap.Error(f.Err))
+			}
+			for _, id := range failedAgents {
+				name, serverID := id, id
+				if ag, ok := agents[id]; ok {
+					if ag.GetName() != "" {
+						name = ag.GetName()
+					}
+					if ag.GetID() != "" {
+						serverID = ag.GetID() // the server keys agents by their GUID
+					}
+				}
+				if rmErr := loomService.RemoveAgent(serverID); rmErr != nil {
+					logger.Warn("Failed to disable agent", zap.String("agent", name), zap.Error(rmErr))
+					continue
+				}
+				logger.Error("Agent disabled until its LLM config is fixed",
+					zap.String("agent", name), zap.String("id", id))
+			}
+			logger.Info("LLM provider preflight checks passed for the other agents",
+				zap.Int("agents_serving", len(agents)-len(failedAgents)),
+				zap.Int("agents_disabled", len(failedAgents)))
 		}
 	}
 

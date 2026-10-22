@@ -677,13 +677,11 @@ func yamlToProto(yaml *AgentConfigYAML) (*loomv1.AgentConfig, error) {
 	}
 	config.Llm = mainLLM
 
-	// Set defaults for LLM if not specified. MaxTokens stays 0 when unset:
-	// provider construction resolves 0 to the model's catalog output limit
-	// (factory.ResolveMaxOutput), and a fixed 4096 here would cut off large
-	// tool calls on models that allow far more output.
-	if config.Llm.Temperature == 0 {
-		config.Llm.Temperature = 0.7
-	}
+	// Temperature and MaxTokens stay 0 when unset. A 0 temperature falls back
+	// to the server's llm.temperature and then to the provider's default
+	// (Bedrock omits the field, since some models reject it). A 0 MaxTokens
+	// resolves to the model's catalog output limit (factory.ResolveMaxOutput);
+	// a fixed 4096 here would cut off large tool calls.
 
 	// Convert role-specific LLM configs
 	if yaml.Agent.JudgeLLM != nil {

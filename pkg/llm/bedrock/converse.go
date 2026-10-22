@@ -45,12 +45,9 @@ func (c *Client) ChatConverse(ctx context.Context, messages []llmtypes.Message, 
 
 	// Build Converse input
 	input := &bedrockruntime.ConverseInput{
-		ModelId:  aws.String(c.modelID),
-		Messages: converseMessages,
-		InferenceConfig: &bedrocktypes.InferenceConfiguration{
-			MaxTokens:   aws.Int32(types.SafeInt32(c.maxTokens)),
-			Temperature: aws.Float32(float32(c.temperature)),
-		},
+		ModelId:         aws.String(c.modelID),
+		Messages:        converseMessages,
+		InferenceConfig: c.converseInferenceConfig(),
 	}
 
 	// Debug logging if LOOM_DEBUG_BEDROCK is set
@@ -244,4 +241,14 @@ func reasoningContentText(rc bedrocktypes.ReasoningContentBlock) string {
 		return aws.ToString(r.Value.Text)
 	}
 	return ""
+}
+
+// converseInferenceConfig sets max tokens, and temperature only when it was
+// configured: some Bedrock models reject a temperature field.
+func (c *Client) converseInferenceConfig() *bedrocktypes.InferenceConfiguration {
+	cfg := &bedrocktypes.InferenceConfiguration{MaxTokens: aws.Int32(types.SafeInt32(c.maxTokens))}
+	if c.temperature != 0 {
+		cfg.Temperature = aws.Float32(float32(c.temperature))
+	}
+	return cfg
 }
