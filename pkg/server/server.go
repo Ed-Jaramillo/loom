@@ -31,6 +31,7 @@ import (
 	"github.com/teradata-labs/loom/pkg/artifacts"
 	"github.com/teradata-labs/loom/pkg/evals"
 	"github.com/teradata-labs/loom/pkg/evals/judges"
+	"github.com/teradata-labs/loom/pkg/llm"
 	"github.com/teradata-labs/loom/pkg/llm/factory"
 	"github.com/teradata-labs/loom/pkg/observability"
 	"github.com/teradata-labs/loom/pkg/shuttle"
@@ -742,6 +743,21 @@ func (s *Server) GetHealth(ctx context.Context, req *loomv1.GetHealthRequest) (*
 }
 
 // llmRoleToString converts an LLMRole enum to a human-readable string for component naming.
+// instrumentSwitchedProvider wraps a provider installed by SwitchModel the way
+// startup and hot reload wrap an agent's providers, so calls on a switched
+// model still produce llm.completion spans. A provider already instrumented
+// with this tracer is not wrapped twice.
+func instrumentSwitchedProvider(p agent.LLMProvider, tracer observability.Tracer, role loomv1.LLMRole) agent.LLMProvider {
+	if tracer == nil || p == nil {
+		return p
+	}
+	name := llmRoleToString(role)
+	if role == loomv1.LLMRole_LLM_ROLE_UNSPECIFIED {
+		name = llm.RoleAgent
+	}
+	return llm.NewInstrumentedProvider(p, tracer, llm.WithRole(name))
+}
+
 func llmRoleToString(role loomv1.LLMRole) string {
 	switch role {
 	case loomv1.LLMRole_LLM_ROLE_AGENT:
@@ -786,7 +802,7 @@ func (s *Server) SwitchModel(ctx context.Context, req *loomv1.SwitchModelRequest
 			return nil, status.Errorf(codes.InvalidArgument, "provider %q not found in pool", req.ProviderName)
 		}
 		// Apply directly to the agent — the pool is stored server-side, not on the agent itself.
-		s.agent.SetLLMProviderForRole(req.Role, provider)
+		s.agent.SetLLMProviderForRole(req.Role, instrumentSwitchedProvider(provider, s.tracer, req.Role))
 		s.activeProviderName = req.ProviderName
 		actualModel := s.agent.GetLLMModelForRole(req.Role)
 		actualProvider := s.agent.GetLLMProviderNameForRole(req.Role)
@@ -829,7 +845,7 @@ func (s *Server) SwitchModel(ctx context.Context, req *loomv1.SwitchModelRequest
 
 	// Switch the agent's LLM provider for the specified role.
 	// When req.Role is LLM_ROLE_UNSPECIFIED, SetLLMProviderForRole delegates to the main agent LLM.
-	s.agent.SetLLMProviderForRole(req.Role, newProvider)
+	s.agent.SetLLMProviderForRole(req.Role, instrumentSwitchedProvider(newProvider, s.tracer, req.Role))
 
 	// Verify the switch by reading back actual values from the agent
 	actualModel := s.agent.GetLLMModelForRole(req.Role)

@@ -377,6 +377,13 @@ func (s *MultiAgentServer) SetTaskManager(tm *task.Manager) {
 	s.taskManager = tm
 }
 
+// switchTracer returns the tracer SwitchModel wraps new providers with.
+func (s *MultiAgentServer) switchTracer() observability.Tracer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tracer
+}
+
 // SetTracer injects an observability tracer for workflow and agent tracing.
 // This should be called after NewMultiAgentServer() to enable observability.
 // Also ensures traceStoreLocal is initialized so GetTrace RPC works.
@@ -3689,7 +3696,7 @@ func (s *MultiAgentServer) SwitchModel(ctx context.Context, req *loomv1.SwitchMo
 			Name:     ag.GetLLMModelForRole(req.Role),
 			Provider: ag.GetLLMProviderNameForRole(req.Role),
 		}
-		ag.SetLLMProviderForRole(req.Role, provider)
+		ag.SetLLMProviderForRole(req.Role, instrumentSwitchedProvider(provider, s.switchTracer(), req.Role))
 		ss.SetActiveProviderName(req.ProviderName)
 		actualModel := ag.GetLLMModelForRole(req.Role)
 		actualProvider := ag.GetLLMProviderNameForRole(req.Role)
@@ -3756,7 +3763,7 @@ func (s *MultiAgentServer) SwitchModel(ctx context.Context, req *loomv1.SwitchMo
 
 	// Switch the agent's LLM provider for the specified role.
 	// When req.Role is LLM_ROLE_UNSPECIFIED, SetLLMProviderForRole delegates to the main agent LLM.
-	ag.SetLLMProviderForRole(req.Role, newProvider)
+	ag.SetLLMProviderForRole(req.Role, instrumentSwitchedProvider(newProvider, s.switchTracer(), req.Role))
 
 	// Verify the switch by checking the agent's current model for this role
 	actualModel := ag.GetLLMModelForRole(req.Role)
@@ -3789,6 +3796,7 @@ func (s *MultiAgentServer) SetProviderPool(pool map[string]agent.LLMProvider, ac
 	// Build or update the delegate single-agent server.
 	if s.singleServer == nil {
 		s.singleServer = NewServer(defaultAg, s.sessionStore)
+		s.singleServer.SetTracer(s.tracer)
 		if s.judgeServer != nil {
 			s.singleServer.SetJudgeServer(s.judgeServer)
 		}
@@ -3808,6 +3816,7 @@ func (s *MultiAgentServer) SetEvalStore(store *evals.Store) {
 		// here because it is set in the constructor and never mutated after that.
 		defaultAg := s.agents[s.defaultAgentID]
 		s.singleServer = NewServer(defaultAg, s.sessionStore)
+		s.singleServer.SetTracer(s.tracer)
 		if s.judgeServer != nil {
 			s.singleServer.SetJudgeServer(s.judgeServer)
 		}
