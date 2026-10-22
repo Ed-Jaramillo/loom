@@ -132,6 +132,8 @@ type MultiAgentServer struct {
 	// Workflow sub-agent tracking for event-driven message notifications
 	workflowSubAgents   map[string]*workflowSubAgentContext // "coordinatorSessionID:agentID" → context
 	workflowSubAgentsMu sync.RWMutex
+	// standalone delivers messages to loaded agents outside workflows.
+	standalone standaloneDelivery
 	// undeliverableMessageGrace overrides defaultUndeliverableMessageGrace when > 0.
 	undeliverableMessageGrace time.Duration
 
@@ -2558,6 +2560,9 @@ func (s *MultiAgentServer) dispatchPendingMessages(ctx context.Context, now time
 		if _, ok := s.messageQueue.GetNotificationChannel(agentID); ok {
 			continue // a listener registered on the queue is notified by Enqueue
 		}
+		if s.deliverToStandaloneAgent(ctx, agentID) {
+			continue
+		}
 		reason := "no listener for this agent ID"
 		if strings.Contains(agentID, ":") {
 			err := s.autoSpawnWorkflowSubAgent(ctx, agentID)
@@ -2577,17 +2582,20 @@ func (s *MultiAgentServer) dispatchPendingMessages(ctx context.Context, now time
 	}
 }
 
-// hasWorkflowListener reports whether a workflow coordinator or sub-agent
-// registered as agentID is running; the queue monitor notifies those directly.
-func (s *MultiAgentServer) hasWorkflowListener(agentID string) bool {
+// hasServerListener reports whether the queue monitor will hand agentID's
+// messages to an agent: a running workflow coordinator or sub-agent registered
+// as agentID, or a loaded standalone agent, which gets a turn per message.
+func (s *MultiAgentServer) hasServerListener(agentID string) bool {
 	s.workflowSubAgentsMu.RLock()
-	defer s.workflowSubAgentsMu.RUnlock()
 	for _, wctx := range s.workflowSubAgents {
 		if wctx.agentID == agentID {
+			s.workflowSubAgentsMu.RUnlock()
 			return true
 		}
 	}
-	return false
+	s.workflowSubAgentsMu.RUnlock()
+	_, _, ok := s.standaloneRecipient(agentID)
+	return ok
 }
 
 // StartMessageQueueMonitor starts a background goroutine that monitors the message queue

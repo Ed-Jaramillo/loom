@@ -8,6 +8,8 @@ package builtin
 import (
 	"context"
 	"fmt"
+	"github.com/teradata-labs/loom/pkg/session"
+	"strconv"
 	"strings"
 	"time"
 
@@ -167,15 +169,19 @@ func (t *SendMessageTool) Execute(ctx context.Context, params map[string]interfa
 		messageType = mt
 	}
 
-	var metadata map[string]string
+	metadata := make(map[string]string)
 	if m, ok := params["metadata"].(map[string]interface{}); ok {
-		metadata = make(map[string]string)
 		for k, v := range m {
 			if vs, ok := v.(string); ok {
 				metadata[k] = vs
 			}
 		}
 	}
+	// Set after the caller's metadata so the model cannot forge them.
+	if sid := session.SessionIDFromContext(ctx); sid != "" {
+		metadata[communication.MetadataFromSession] = sid
+	}
+	metadata[communication.MetadataHop] = strconv.Itoa(communication.MessageHopFromContext(ctx) + 1)
 
 	// Create payload
 	payload := &loomv1.MessagePayload{

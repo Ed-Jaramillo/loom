@@ -8,6 +8,7 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"github.com/teradata-labs/loom/pkg/session"
 	"testing"
 	"time"
 
@@ -896,4 +897,25 @@ func TestSendMessage_ReportsWhetherRecipientIsListening(t *testing.T) {
 			require.NotNil(t, msg, "the message is queued for the recipient")
 		})
 	}
+}
+
+func TestSendMessage_StampsSenderSessionAndHop(t *testing.T) {
+	queue := createTestQueue(t)
+	tool := NewSendMessageTool(queue, "sender")
+
+	ctx := communication.WithMessageHop(session.WithSessionID(context.Background(), "sess-a"), 2)
+	result, err := tool.Execute(ctx, map[string]interface{}{
+		"to_agent": "receiver",
+		"message":  "hi",
+		"metadata": map[string]interface{}{communication.MetadataHop: "1", "topic": "x"},
+	})
+	require.NoError(t, err)
+	require.True(t, result.Success)
+
+	msg, err := queue.Dequeue(context.Background(), "receiver")
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	assert.Equal(t, "sess-a", msg.Metadata[communication.MetadataFromSession])
+	assert.Equal(t, "3", msg.Metadata[communication.MetadataHop], "hop is set by the tool, not the model")
+	assert.Equal(t, "x", msg.Metadata["topic"])
 }

@@ -485,6 +485,41 @@ func (q *MessageQueue) Acknowledge(ctx context.Context, messageID string) error 
 	return nil
 }
 
+// Reject marks an in-flight message as failed, removes it from its agent's
+// queue and logs reason. Use it when a delivered message cannot be handled.
+func (q *MessageQueue) Reject(ctx context.Context, messageID, reason string) error {
+	if q.closed.Load() {
+		return fmt.Errorf("message queue is closed")
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	msg, exists := q.inFlight[messageID]
+	if !exists {
+		return fmt.Errorf("message not in-flight: %s", messageID)
+	}
+	msg.Status = QueueMessageStatusFailed
+	delete(q.inFlight, messageID)
+	queue := q.queues[msg.ToAgent]
+	for i, m := range queue {
+		if m.ID == messageID {
+			q.queues[msg.ToAgent] = append(queue[:i], queue[i+1:]...)
+			break
+		}
+	}
+	if err := q.updateMessageStatus(ctx, messageID, QueueMessageStatusFailed); err != nil {
+		q.logger.Warn("Failed to update message status in database", zap.Error(err))
+	}
+	q.totalFailed.Add(1)
+	q.logger.Warn("Message rejected; marked failed",
+		zap.String("message_id", messageID),
+		zap.String("to_agent", msg.ToAgent),
+		zap.String("from_agent", msg.FromAgent),
+		zap.String("reason", reason))
+	return nil
+}
+
 // Requeue returns an in-flight message back to pending state for retry.
 func (q *MessageQueue) Requeue(ctx context.Context, messageID string) error {
 	if q.closed.Load() {

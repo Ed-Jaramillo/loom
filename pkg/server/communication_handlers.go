@@ -38,7 +38,7 @@ func (s *MultiAgentServer) ConfigureCommunication(
 	s.messageBus = bus
 	s.messageQueue = queue
 	if queue != nil {
-		queue.SetListenerCheck(s.hasWorkflowListener)
+		queue.SetListenerCheck(s.hasServerListener)
 	}
 	s.sharedMemoryComm = sharedMem
 	s.refStore = refStore
