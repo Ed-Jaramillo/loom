@@ -101,3 +101,23 @@ func TestBuildCatalogCompleteness(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalog_ClaudeOpus55(t *testing.T) {
+	for _, c := range []struct{ provider, id string }{
+		{"anthropic", "claude-opus-5-5"},
+		{"bedrock", "us.anthropic.claude-opus-5-5"},
+		{"bedrock", "global.anthropic.claude-opus-5-5"},
+	} {
+		info := Lookup(c.provider, c.id)
+		if !assert.NotNil(t, info, c.id) {
+			continue
+		}
+		assert.Equal(t, int32(1_000_000), info.ContextWindow, c.id)
+		assert.Equal(t, int32(128_000), info.MaxOutputTokens, c.id)
+
+		in, out, found := LookupPricing(c.provider, c.id)
+		assert.True(t, found, c.id)
+		assert.Equal(t, 4.0, in, c.id)
+		assert.Equal(t, 20.0, out, c.id)
+	}
+}

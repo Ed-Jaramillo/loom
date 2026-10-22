@@ -41,8 +41,23 @@ func BuildCatalog() map[string][]*loomv1.ModelInfo {
 		// Verified against https://platform.claude.com/docs/en/docs/about-claude/models/overview
 		// on 2026-04-22. Deprecated Sonnet 4 / Opus 4 (20250514) intentionally omitted.
 		"anthropic": {
+			// Claude Opus 5.5: 1M context, 128K output, $4 / $20 per MTok
+			// (Anthropic API rates, 2026-10). Thinking is always on and
+			// sampling parameters (temperature, top_p, top_k) are rejected.
 			{
-				// Current flagship. Uses adaptive thinking (not extended thinking).
+				Id:                  "claude-opus-5-5",
+				Name:                "Claude Opus 5.5",
+				Provider:            "anthropic",
+				Capabilities:        []string{"text", "vision", "tool-use", "thinking"},
+				ContextWindow:       1_000_000,
+				MaxOutputTokens:     128_000,
+				CostPer_1MInputUsd:  4.0,
+				CostPer_1MOutputUsd: 20.0,
+				IsReasoning:         true,
+				ShowInDropdown:      true,
+			},
+			{
+				// Uses adaptive thinking (not extended thinking).
 				Id:                  "claude-opus-4-7",
 				Name:                "Claude Opus 4.7",
 				Provider:            "anthropic",
@@ -739,6 +754,32 @@ func BuildCatalog() map[string][]*loomv1.ModelInfo {
 		// Both us.* (regional) and global.* (dynamic routing) forms are listed where
 		// applicable so ProviderFactory.normalizeModelID only needs to strip prefixes.
 		"bedrock": {
+			// Bedrock bills Claude at partner rates; these mirror the Anthropic
+			// API rates, as the other Bedrock entries here do.
+			{
+				Id:                  "us.anthropic.claude-opus-5-5",
+				Name:                "Claude Opus 5.5 (Bedrock)",
+				Provider:            "bedrock",
+				Capabilities:        []string{"text", "vision", "tool-use", "thinking"},
+				ContextWindow:       1_000_000,
+				MaxOutputTokens:     128_000,
+				CostPer_1MInputUsd:  4.0,
+				CostPer_1MOutputUsd: 20.0,
+				IsReasoning:         true,
+				ShowInDropdown:      false,
+			},
+			{
+				Id:                  "global.anthropic.claude-opus-5-5",
+				Name:                "Claude Opus 5.5 (Bedrock, global)",
+				Provider:            "bedrock",
+				Capabilities:        []string{"text", "vision", "tool-use", "thinking"},
+				ContextWindow:       1_000_000,
+				MaxOutputTokens:     128_000,
+				CostPer_1MInputUsd:  4.0,
+				CostPer_1MOutputUsd: 20.0,
+				IsReasoning:         true,
+				ShowInDropdown:      false,
+			},
 			{
 				Id:                  "us.anthropic.claude-opus-4-7-v1:0",
 				Name:                "Claude Opus 4.7 (Bedrock)",

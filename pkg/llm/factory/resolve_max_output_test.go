@@ -33,6 +33,14 @@ func TestResolveMaxOutput(t *testing.T) {
 			description:      "explicit FactoryConfig.MaxTokens must override catalog",
 		},
 		{
+			name:             "bedrock opus 5.5 reads catalog",
+			configuredMax:    0,
+			provider:         "bedrock",
+			model:            "us.anthropic.claude-opus-5-5",
+			wantMaxOutputCap: 128_000,
+			description:      "an unset max_tokens on Opus 5.5 must not fall back to 4096",
+		},
+		{
 			name:             "anthropic opus 4.6 reads catalog",
 			configuredMax:    0,
 			provider:         "anthropic",
