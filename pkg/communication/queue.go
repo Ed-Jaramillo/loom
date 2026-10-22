@@ -97,6 +97,7 @@ type MessageQueue struct {
 
 	// Agent validation (optional function to check if agent exists)
 	agentValidator func(agentID string) bool
+	listenerCheck  func(agentID string) bool
 
 	// Persistent storage
 	db     *sql.DB
@@ -979,6 +980,29 @@ func (q *MessageQueue) SetAgentValidator(validator func(agentID string) bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.agentValidator = validator
+}
+
+// SetListenerCheck sets a function reporting whether something outside the
+// queue's notification channels will read agentID's messages, such as a
+// workflow coordinator that the server's queue monitor notifies.
+func (q *MessageQueue) SetListenerCheck(check func(agentID string) bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.listenerCheck = check
+}
+
+// HasListener reports whether a reader for agentID's messages is running now:
+// a registered notification channel, or the listener check. A message to an
+// agent without one stays pending until a listener starts or it is failed as
+// undeliverable.
+func (q *MessageQueue) HasListener(agentID string) bool {
+	if _, ok := q.GetNotificationChannel(agentID); ok {
+		return true
+	}
+	q.mu.RLock()
+	check := q.listenerCheck
+	q.mu.RUnlock()
+	return check != nil && check(agentID)
 }
 
 // AgentExists checks if an agent exists using the registered validator.

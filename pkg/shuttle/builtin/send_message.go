@@ -213,25 +213,34 @@ func (t *SendMessageTool) Execute(ctx context.Context, params map[string]interfa
 		}, nil
 	}
 
-	// Build success result with detailed ACK
+	listening := t.queue.HasListener(toAgent)
 	result := map[string]interface{}{
-		"status":       "enqueued",
-		"message_id":   messageID,
-		"sent_at":      time.Now().Format(time.RFC3339),
-		"from_agent":   t.agentID,
-		"to_agent":     toAgent,
-		"message_type": messageType,
-		"message_size": len(message),
+		"status":              "enqueued",
+		"message_id":          messageID,
+		"sent_at":             time.Now().Format(time.RFC3339),
+		"from_agent":          t.agentID,
+		"to_agent":            toAgent,
+		"message_type":        messageType,
+		"message_size":        len(message),
+		"recipient_listening": listening,
+	}
+	if !listening {
+		result["delivery_note"] = fmt.Sprintf("No listener for '%s' is running, so nothing is reading this message now. It stays queued until '%s' starts listening (for example as a workflow agent) and may be marked failed if none does. Don't wait for a reply unless you know the recipient will start.", toAgent, toAgent)
+		t.logger.Info("Message enqueued for agent with no active listener",
+			zap.String("message_id", messageID),
+			zap.String("from_agent", t.agentID),
+			zap.String("to_agent", toAgent))
 	}
 
 	return &shuttle.Result{
 		Success: true,
 		Data:    result,
 		Metadata: map[string]interface{}{
-			"message_id":   messageID,
-			"from_agent":   t.agentID,
-			"to_agent":     toAgent,
-			"message_type": messageType,
+			"message_id":          messageID,
+			"from_agent":          t.agentID,
+			"to_agent":            toAgent,
+			"message_type":        messageType,
+			"recipient_listening": listening,
 		},
 		ExecutionTimeMs: time.Since(start).Milliseconds(),
 	}, nil

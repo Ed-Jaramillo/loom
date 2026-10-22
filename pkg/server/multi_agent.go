@@ -2577,6 +2577,19 @@ func (s *MultiAgentServer) dispatchPendingMessages(ctx context.Context, now time
 	}
 }
 
+// hasWorkflowListener reports whether a workflow coordinator or sub-agent
+// registered as agentID is running; the queue monitor notifies those directly.
+func (s *MultiAgentServer) hasWorkflowListener(agentID string) bool {
+	s.workflowSubAgentsMu.RLock()
+	defer s.workflowSubAgentsMu.RUnlock()
+	for _, wctx := range s.workflowSubAgents {
+		if wctx.agentID == agentID {
+			return true
+		}
+	}
+	return false
+}
+
 // StartMessageQueueMonitor starts a background goroutine that monitors the message queue
 // and notifies workflow sub-agents when they have pending messages (event-driven, not polling).
 func (s *MultiAgentServer) StartMessageQueueMonitor(ctx context.Context) {

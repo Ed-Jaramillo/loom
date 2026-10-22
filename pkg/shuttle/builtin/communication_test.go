@@ -858,3 +858,42 @@ func TestSendMessageAutoHealingUsesExplicitWorkflowContext(t *testing.T) {
 	require.NotNil(t, message)
 	assert.Equal(t, "9722a860-5844-4e58-b290-143684753110", message.FromAgent)
 }
+
+func TestSendMessage_ReportsWhetherRecipientIsListening(t *testing.T) {
+	queue := createTestQueue(t)
+	queue.RegisterNotificationChannel("worker", make(chan struct{}, 1))
+	queue.SetListenerCheck(func(agentID string) bool { return agentID == "coordinator" })
+	tool := NewSendMessageTool(queue, "sender")
+
+	for _, tc := range []struct {
+		to        string
+		listening bool
+	}{
+		{"worker", true},
+		{"coordinator", true},
+		{"standalone", false},
+	} {
+		t.Run(tc.to, func(t *testing.T) {
+			result, err := tool.Execute(context.Background(), map[string]interface{}{
+				"to_agent": tc.to,
+				"message":  "hello",
+			})
+			require.NoError(t, err)
+			require.True(t, result.Success, "a message is enqueued whether or not anyone listens")
+
+			data := result.Data.(map[string]interface{})
+			assert.Equal(t, "enqueued", data["status"])
+			assert.Equal(t, tc.listening, data["recipient_listening"])
+			assert.Equal(t, tc.listening, result.Metadata["recipient_listening"])
+			note, hasNote := data["delivery_note"]
+			assert.Equal(t, !tc.listening, hasNote)
+			if hasNote {
+				assert.Contains(t, note, tc.to)
+			}
+
+			msg, err := queue.Dequeue(context.Background(), tc.to)
+			require.NoError(t, err)
+			require.NotNil(t, msg, "the message is queued for the recipient")
+		})
+	}
+}

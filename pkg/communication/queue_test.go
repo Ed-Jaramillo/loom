@@ -511,3 +511,21 @@ func TestQueueValidation(t *testing.T) {
 	_, err = queue.Dequeue(ctx, "")
 	assert.Error(t, err)
 }
+
+func TestMessageQueue_HasListener(t *testing.T) {
+	queue, err := NewMessageQueue(":memory:", nil, zaptest.NewLogger(t))
+	require.NoError(t, err)
+	defer func() { _ = queue.Close() }()
+
+	assert.False(t, queue.HasListener("worker"), "no channel and no check")
+
+	queue.RegisterNotificationChannel("worker", make(chan struct{}, 1))
+	assert.True(t, queue.HasListener("worker"), "registered channel")
+
+	queue.SetListenerCheck(func(agentID string) bool { return agentID == "coordinator" })
+	assert.True(t, queue.HasListener("coordinator"), "listener check")
+	assert.False(t, queue.HasListener("standalone"))
+
+	queue.UnregisterNotificationChannel("worker")
+	assert.False(t, queue.HasListener("worker"))
+}
