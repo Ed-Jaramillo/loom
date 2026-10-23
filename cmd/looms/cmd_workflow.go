@@ -671,6 +671,9 @@ func setupWorkflowRuntime(pattern *loomv1.WorkflowPattern, promptGates bool) (*w
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent registry: %w", err)
 	}
+	// Stage agents declaring Phoenix tools get them as under looms serve.
+	// No prompt registry here: ask_phoenix_assistant uses its built-in prompts.
+	registry.SetServerToolFactory(serverToolFactory(config, nil, logger))
 
 	// Initialize MessageBus and SharedMemory for workflow communication
 	// This enables autonomous agent coordination in iterative workflows

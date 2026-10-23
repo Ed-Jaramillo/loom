@@ -129,7 +129,18 @@ type Registry struct {
 	// entry. Subsystems (extractor, task manager, error store) keep running
 	// regardless. Set by SetSuppressedBuiltinTools. Protected by mu.
 	suppressedBuiltinTools []string
+
+	// serverToolFactory builds tools.builtin entries that builtin.ByName
+	// cannot construct because they need server configuration (the Phoenix
+	// tools). Without it, registry-built agents such as workflow stages
+	// silently lose those tools. Set by SetServerToolFactory. Protected by mu.
+	serverToolFactory ServerToolFactory
 }
+
+// ServerToolFactory builds a builtin tool that needs server configuration.
+// It returns (nil, nil) for a name it does not build, and an error when it
+// builds the name but cannot configure it.
+type ServerToolFactory func(name string) (shuttle.Tool, error)
 
 // AgentInstanceInfo tracks runtime information about an agent instance
 type AgentInstanceInfo struct {
@@ -312,6 +323,15 @@ func (r *Registry) SetSuppressedBuiltinTools(names []string) {
 	r.suppressedBuiltinTools = append(r.suppressedBuiltinTools[:0], names...)
 	r.logger.Info("Suppressed builtin tools configured in registry",
 		zap.Strings("tools", r.suppressedBuiltinTools))
+}
+
+// SetServerToolFactory installs the factory buildAgent consults for a
+// tools.builtin entry that builtin.ByName does not know. Must be called
+// before agents are created to take effect for those agents.
+func (r *Registry) SetServerToolFactory(f ServerToolFactory) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.serverToolFactory = f
 }
 
 // LoadAgents loads all agent configurations from the agents directory and workflows
@@ -982,6 +1002,9 @@ func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (
 	// Only register tools explicitly listed in config.Tools.Builtin
 	// Pass agent's PromptRegistry for externalized tool descriptions
 	if config.Tools != nil && len(config.Tools.Builtin) > 0 {
+		r.mu.RLock()
+		serverToolFactory := r.serverToolFactory
+		r.mu.RUnlock()
 		// Filter builtin tools based on config
 		for _, toolName := range config.Tools.Builtin {
 			// The server constructs this tool later with request-scoped session
@@ -990,6 +1013,17 @@ func (r *Registry) buildAgent(ctx context.Context, config *loomv1.AgentConfig) (
 				continue
 			}
 			tool := builtin.ByName(toolName)
+			if tool == nil && serverToolFactory != nil {
+				built, err := serverToolFactory(toolName)
+				if err != nil {
+					r.logger.Warn("Server-built tool not registered",
+						zap.String("tool", toolName),
+						zap.String("agent", config.Name),
+						zap.Error(err))
+					continue
+				}
+				tool = built
+			}
 			if tool != nil {
 				// Wrap with PromptAwareTool if prompts registry available
 				if agent.prompts != nil {

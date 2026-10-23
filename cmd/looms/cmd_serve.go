@@ -58,7 +58,6 @@ import (
 	"github.com/teradata-labs/loom/pkg/orchestration"
 	"github.com/teradata-labs/loom/pkg/prompts"
 	"github.com/teradata-labs/loom/pkg/scheduler"
-	"github.com/teradata-labs/loom/pkg/sentinel/assistant"
 	"github.com/teradata-labs/loom/pkg/server"
 	"github.com/teradata-labs/loom/pkg/shuttle"
 	"github.com/teradata-labs/loom/pkg/shuttle/builtin"
@@ -240,26 +239,15 @@ func registerYAMLBuiltinTools(
 			continue
 		}
 
-		var tool shuttle.Tool
-		if isPhoenixReadTool(toolName) {
-			// Read-only Phoenix tools; need only sentinel.phoenix.base_url and the key.
-			built, err := newPhoenixReadTool(toolName, config)
-			if err != nil {
-				logger.Warn(indent+"  "+toolName+" not registered", zap.Error(err))
-				continue
-			}
-			tool = built
-		} else if toolName == assistant.ToolName {
-			// Needs the server's Phoenix client; built from sentinel.phoenix.
-			// Nil (with the reason logged) when the tool is disabled or the
-			// API key env var is unset, so the YAML mention is not an error.
-			built, err := newPhoenixAssistantTool(config, promptRegistry, logger)
-			if err != nil {
-				logger.Warn(indent+"  ask_phoenix_assistant not registered", zap.Error(err))
-				continue
-			}
-			tool = built
-		} else if toolName == "agent_management" && registry != nil {
+		// Phoenix tools need server config. A configuration error (tool
+		// disabled, API key env var unset) is logged and the YAML mention
+		// skipped, so it is not fatal.
+		tool, err := newServerBuiltTool(toolName, config, promptRegistry, logger)
+		if err != nil {
+			logger.Warn(indent+"  "+toolName+" not registered", zap.Error(err))
+			continue
+		}
+		if tool == nil && toolName == "agent_management" && registry != nil {
 			hook := func(skillName, filePath string) {
 				reloaded, failed := registry.ReloadAllSkillRouters(context.Background())
 				logger.Info(agentManagementLogTag+": skill write triggered router reload",
@@ -269,7 +257,7 @@ func registerYAMLBuiltinTools(
 					zap.Int("failed", failed))
 			}
 			tool = builtin.NewAgentManagementTool(builtin.WithSkillWriteHook(hook))
-		} else {
+		} else if tool == nil {
 			tool = builtin.ByName(toolName)
 		}
 		if tool != nil {
@@ -2652,6 +2640,9 @@ func runServe(cmd *cobra.Command, args []string) {
 	if registry != nil {
 		wireRegistrySubsystems(registry, taskManager, taskDecomposer,
 			graphMemoryStore, memoryEmbedder, builtinToolsToSuppress(), logger)
+		// Workflow stages are built by the registry, not the boot loader;
+		// without this they lose the Phoenix tools their YAML declares.
+		registry.SetServerToolFactory(serverToolFactory(config, promptRegistry, logger))
 	}
 
 	// Wire the eval store for ABTest result persistence — pool-independent.

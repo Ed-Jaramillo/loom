@@ -23,6 +23,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/teradata-labs/loom/internal/version"
+	"github.com/teradata-labs/loom/pkg/agent"
 	"github.com/teradata-labs/loom/pkg/observability"
 	"github.com/teradata-labs/loom/pkg/observability/phoenix"
 	"github.com/teradata-labs/loom/pkg/prompts"
@@ -122,6 +123,32 @@ func newPhoenixAssistantTool(cfg *Config, promptRegistry prompts.PromptRegistry,
 			zap.Bool("record_local_traces", a.RecordLocalTraces))
 	}
 	return tool, nil
+}
+
+// newServerBuiltTool builds the tools.builtin entries that need server
+// configuration and so cannot come from builtin.ByName. It returns (nil, nil)
+// for any other name. Both the serve boot path (registerYAMLBuiltinTools) and
+// registry-built agents (serverToolFactory) go through it so they cannot drift.
+func newServerBuiltTool(name string, cfg *Config, promptRegistry prompts.PromptRegistry, logger *zap.Logger) (shuttle.Tool, error) {
+	switch {
+	case isPhoenixReadTool(name):
+		// Read-only Phoenix tools; need only sentinel.phoenix.base_url and the key.
+		return newPhoenixReadTool(name, cfg)
+	case name == assistant.ToolName:
+		// Needs the server's Phoenix client; built from sentinel.phoenix.
+		return newPhoenixAssistantTool(cfg, promptRegistry, logger)
+	default:
+		return nil, nil
+	}
+}
+
+// serverToolFactory adapts newServerBuiltTool for agent.Registry, so agents
+// the registry builds (workflow stages, RPC-created agents) get the same
+// server-built tools as the agents looms serve loads at boot.
+func serverToolFactory(cfg *Config, promptRegistry prompts.PromptRegistry, logger *zap.Logger) agent.ServerToolFactory {
+	return func(name string) (shuttle.Tool, error) {
+		return newServerBuiltTool(name, cfg, promptRegistry, logger)
+	}
 }
 
 // isPhoenixReadTool reports whether name is one of the read-only Phoenix tools.

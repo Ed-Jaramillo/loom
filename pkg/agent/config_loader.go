@@ -1706,11 +1706,12 @@ func loadOrchestrationWorkflow(path string, data map[string]interface{}, llmProv
 		return nil, fmt.Errorf("no agents found in workflow")
 	}
 
-	// Build LLM config from provider
+	// Build LLM config from provider. Temperature stays unset (0) so the
+	// server's llm.temperature or the provider default applies; a forced
+	// value is rejected by models that deprecate temperature (Bedrock 400).
 	llmConfig := &loomv1.LLMConfig{
-		Provider:    llmProvider.Name(),
-		Model:       llmProvider.Model(),
-		Temperature: 0.7,
+		Provider: llmProvider.Name(),
+		Model:    llmProvider.Model(),
 		// MaxTokens unset (0): resolved to the model's catalog output limit.
 	}
 
@@ -1957,7 +1958,8 @@ func loadWeaverWorkflow(path string, data map[string]interface{}, llmProvider LL
 	if llmData, ok := data["llm"].(map[string]interface{}); ok {
 		provider, _ := llmData["provider"].(string)
 		model, _ := llmData["model"].(string)
-		temperature := 0.7
+		// 0 = unset: the server's llm.temperature or the provider default.
+		var temperature float64
 		if tempVal, ok := llmData["temperature"].(float64); ok {
 			temperature = tempVal
 		}
@@ -1979,10 +1981,9 @@ func loadWeaverWorkflow(path string, data map[string]interface{}, llmProvider LL
 	} else {
 		// Fallback to provider default
 		llmConfig = &loomv1.LLMConfig{
-			Provider:    llmProvider.Name(),
-			Model:       llmProvider.Model(),
-			Temperature: 0.7,
-			// MaxTokens unset (0): resolved to the model's catalog output limit.
+			Provider: llmProvider.Name(),
+			Model:    llmProvider.Model(),
+			// Temperature and MaxTokens unset (0), as above.
 		}
 	}
 
