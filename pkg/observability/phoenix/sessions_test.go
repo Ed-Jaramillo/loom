@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,13 +99,18 @@ func TestChat_SendsSpecShapedRequestAndParsesStream(t *testing.T) {
 	assert.Equal(t, true, got["headless"])
 	assert.Equal(t, "manual", got["editPermission"])
 	assert.Equal(t, "submit-message", got["trigger"])
-	assert.NotEmpty(t, got["id"])
+	// Phoenix rejects any message id that is not a bare UUID when it saves
+	// the turn, which empties the reply.
+	_, err = uuid.Parse(got["id"].(string))
+	assert.NoError(t, err, "chat request id is a bare UUID")
 	_, hasLast := got["lastMessageId"]
 	assert.False(t, hasLast, "lastMessageId omitted on an empty transcript")
 	_, hasApprovals := got["toolApprovals"]
 	assert.False(t, hasApprovals)
 	msg := got["message"].(map[string]any)
 	assert.Equal(t, "user", msg["role"])
+	assert.Regexp(t, `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, msg["id"],
+		"user message id matches Phoenix's valid_message_id constraint")
 	parts := msg["parts"].([]any)
 	assert.Equal(t, map[string]any{"type": "text", "text": "What failed?"}, parts[0])
 	ctxs := got["contexts"].([]any)

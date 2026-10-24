@@ -392,10 +392,13 @@ type TextPart struct {
 	Text string `json:"text"`
 }
 
-// NewUserMessage builds a one-part user message with a fresh id.
+// NewUserMessage builds a one-part user message with a fresh id. The id must
+// be a bare 8-4-4-4-12 UUID: Phoenix stores it under a CHECK constraint
+// (agent_session_messages.valid_message_id), and any other form makes it fail
+// to save the turn and cut the reply off.
 func NewUserMessage(text string) *UserMessage {
 	return &UserMessage{
-		ID:    "loom-" + uuid.NewString(),
+		ID:    uuid.NewString(),
 		Role:  "user",
 		Parts: []TextPart{{Type: "text", Text: text}},
 	}
@@ -428,7 +431,7 @@ func (c *Client) Chat(ctx context.Context, sessionID string, req ChatRequest, pa
 		req.EditPermission = "manual"
 	}
 	if req.ID == "" {
-		req.ID = "loom-" + uuid.NewString()
+		req.ID = uuid.NewString()
 	}
 	if parser.MaxBytes <= 0 {
 		parser.MaxBytes = c.maxBytes
