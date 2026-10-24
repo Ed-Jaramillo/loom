@@ -11,12 +11,14 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
 	loomv1 "github.com/teradata-labs/loom/gen/go/loom/v1"
 	"github.com/teradata-labs/loom/pkg/skills"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1578,33 +1580,12 @@ func loadAgentReferenceWorkflow(path, workflowName, description, entrypoint stri
 	// Load agent configs and create namespaced copies
 	var configs []*loomv1.AgentConfig
 
-	// Determine config directory (assume same directory as workflow file or $LOOM_DATA_DIR/agents)
-	configDir := filepath.Dir(path)
-	agentsDir := filepath.Join(filepath.Dir(configDir), "agents")
+	agentsDir := workflowAgentsDir(path)
 
 	for name, ref := range agentRefs {
-		// Try to find the referenced agent config
-		var agentConfigPath string
-
-		// Try in agents directory first
-		candidatePath := filepath.Join(agentsDir, ref.AgentConfig+".yaml")
-		if _, err := os.Stat(candidatePath); err == nil {
-			agentConfigPath = candidatePath
-		} else {
-			// Try subdirectories
-			err := filepath.WalkDir(agentsDir, func(p string, d os.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				if !d.IsDir() && filepath.Base(p) == ref.AgentConfig+".yaml" {
-					agentConfigPath = p
-					return filepath.SkipAll
-				}
-				return nil
-			})
-			if err != nil || agentConfigPath == "" {
-				return nil, fmt.Errorf("agent config '%s' not found in %s", ref.AgentConfig, agentsDir)
-			}
+		agentConfigPath := findAgentConfigFile(agentsDir, ref.AgentConfig)
+		if agentConfigPath == "" {
+			return nil, fmt.Errorf("agent config '%s' not found in %s", ref.AgentConfig, agentsDir)
 		}
 
 		// Load the referenced agent config
@@ -1660,6 +1641,76 @@ func loadAgentReferenceWorkflow(path, workflowName, description, entrypoint stri
 	}
 
 	return configs, nil
+}
+
+// workflowAgentsDir is the agents directory next to a workflow file's
+// directory ($LOOM_DATA_DIR/workflows/x.yaml -> $LOOM_DATA_DIR/agents).
+func workflowAgentsDir(workflowPath string) string {
+	return filepath.Join(filepath.Dir(filepath.Dir(workflowPath)), "agents")
+}
+
+// findAgentConfigFile returns the path of <name>.yaml in agentsDir or one of
+// its subdirectories, or "" when there is none.
+func findAgentConfigFile(agentsDir, name string) string {
+	candidate := filepath.Join(agentsDir, name+".yaml")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	var found string
+	_ = filepath.WalkDir(agentsDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && filepath.Base(p) == name+".yaml" {
+			found = p
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// workflowStageCommunicationTools are what a chat-mode stage agent needs to
+// read its brief and answer the workflow coordinator.
+var workflowStageCommunicationTools = []string{"send_message", "shared_memory_read", "shared_memory_write"}
+
+// workflowStageAgentConfig builds the chat-mode agent for a workflow stage
+// from the stage's real agent config, so the stage keeps that agent's prompt,
+// model settings, memory and tools (builtin, MCP and custom) and only gains
+// the communication tools. Without this the stage ran as a placeholder with a
+// one-line prompt and no domain tools.
+func workflowStageAgentConfig(base *loomv1.AgentConfig, name, workflowName, path string, metadata map[string]string) *loomv1.AgentConfig {
+	cfg := proto.Clone(base).(*loomv1.AgentConfig)
+	cfg.Name = name
+	if cfg.Description == "" {
+		cfg.Description = fmt.Sprintf("%s sub-agent for %s workflow", metadata["agent_id"], workflowName)
+	}
+	cfg.SystemPrompt = strings.TrimRight(cfg.SystemPrompt, "\n") + fmt.Sprintf(
+		"\n\nThis agent is running as a stage of the %q workflow. Instructions arrive as messages from the workflow coordinator; "+
+			"read any shared-memory keys they name with shared_memory_read and send your result back to the coordinator with send_message.",
+		workflowName)
+	if cfg.Tools == nil {
+		cfg.Tools = &loomv1.ToolsConfig{}
+	}
+	// tools.none is the agent's explicit choice; it is honored here too.
+	if !cfg.Tools.GetNone() {
+		for _, tool := range workflowStageCommunicationTools {
+			if !slices.Contains(cfg.Tools.Builtin, tool) {
+				cfg.Tools.Builtin = append(cfg.Tools.Builtin, tool)
+			}
+		}
+	}
+	merged := make(map[string]string, len(metadata)+len(cfg.Metadata))
+	for k, v := range cfg.Metadata {
+		merged[k] = v
+	}
+	for k, v := range metadata {
+		merged[k] = v
+	}
+	merged["base_agent"] = base.Name
+	merged["workflow_file"] = path
+	cfg.Metadata = merged
+	return cfg
 }
 
 // loadOrchestrationWorkflow parses orchestration format workflows (apiVersion/kind/spec)
@@ -1754,9 +1805,26 @@ Sub-agents: %s`,
 	}
 	configs = append(configs, coordinatorConfig)
 
-	// Create sub-agent configs (placeholders - actual agents should exist in registry)
+	// Create sub-agent configs. A stage whose agent config exists in the
+	// agents directory inherits it; otherwise it gets a placeholder.
+	agentsDir := workflowAgentsDir(path)
 	for _, agentID := range agentIDs {
 		subAgentName := fmt.Sprintf("%s:%s", workflowName, agentID)
+		stageMetadata := map[string]string{
+			"workflow":      workflowName,
+			"role":          "executor",
+			"agent_id":      agentID,
+			"workflow_file": path,
+			"type":          "workflow_agent",
+		}
+		if basePath := findAgentConfigFile(agentsDir, agentID); basePath != "" {
+			base, err := LoadAgentConfig(basePath)
+			if err != nil {
+				return nil, fmt.Errorf("workflow %q stage agent %q: %w", workflowName, agentID, err)
+			}
+			configs = append(configs, workflowStageAgentConfig(base, subAgentName, workflowName, path, stageMetadata))
+			continue
+		}
 		subAgentConfig := &loomv1.AgentConfig{
 			Name:         subAgentName,
 			Description:  fmt.Sprintf("%s sub-agent for %s workflow", agentID, workflowName),
@@ -1774,13 +1842,7 @@ Sub-agents: %s`,
 				MaxIterations:  15,
 				TimeoutSeconds: 600,
 			},
-			Metadata: map[string]string{
-				"workflow":      workflowName,
-				"role":          "executor",
-				"agent_id":      agentID,
-				"workflow_file": path,
-				"type":          "workflow_agent",
-			},
+			Metadata: stageMetadata,
 		}
 		configs = append(configs, subAgentConfig)
 	}
