@@ -55,6 +55,13 @@ type fakePhoenix struct {
 	spansForTrace int
 	busyOnce      bool
 	failMessages  bool
+	// activePolls > 0 models real Phoenix, which saves the assistant message
+	// before it releases the turn lock: after a chat the session reports
+	// is_active for that many GETs and the assistant message is withheld
+	// from the transcript until it goes idle.
+	activePolls int
+	activeLeft  int
+	withheld    []json.RawMessage
 }
 
 type scriptedTurn struct {
@@ -116,7 +123,16 @@ func (f *fakePhoenix) handler() http.Handler {
 		_, _ = fmt.Fprintf(w, `{"data":{"id":%q}}`, id)
 	}))
 	mux.HandleFunc("GET /v1/agent_sessions/{id}", auth(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(w, `{"data":{"id":%q,"title":"","created_at":"2026-10-20T00:00:00Z","updated_at":"2026-10-20T00:00:00Z","is_ephemeral":true,"model":{"providerType":"builtin","provider":"ANTHROPIC","modelName":"claude-test"},"is_active":false}}`, r.PathValue("id"))
+		f.mu.Lock()
+		active := f.activeLeft > 0
+		if active {
+			f.activeLeft--
+		} else if len(f.withheld) > 0 {
+			f.transcript = append(f.transcript, f.withheld...)
+			f.withheld = nil
+		}
+		f.mu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"data":{"id":%q,"title":"","created_at":"2026-10-20T00:00:00Z","updated_at":"2026-10-20T00:00:00Z","is_ephemeral":true,"model":{"providerType":"builtin","provider":"ANTHROPIC","modelName":"claude-test"},"is_active":%t}}`, r.PathValue("id"), active)
 	}))
 	mux.HandleFunc("GET /v1/agent_sessions/{id}/messages", auth(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -176,7 +192,12 @@ func (f *fakePhoenix) handler() http.Handler {
 		f.turns = f.turns[1:]
 		if turn.assistant != nil {
 			raw, _ := json.Marshal(turn.assistant)
-			f.transcript = append(f.transcript, raw)
+			if f.activePolls > 0 {
+				f.withheld = append(f.withheld, raw)
+				f.activeLeft = f.activePolls
+			} else {
+				f.transcript = append(f.transcript, raw)
+			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(turn.stream))
@@ -569,4 +590,49 @@ func TestExecute_AssistantErrorWithoutAnswer(t *testing.T) {
 	assert.Contains(t, res.Error.Message, "invalid x-api-key")
 	assert.Equal(t, "session-1", res.Error.Details["phoenix_session_id"])
 	assert.Len(t, f.chatBodies, 1)
+}
+
+// TestExecute_WaitsForTranscriptBeforeReadingAnswer mirrors the first Bedrock
+// run on pepm-0005: the stream finished, Phoenix was still saving the turn,
+// and an immediate transcript read had no assistant message, so the answer
+// came back empty although PXI had answered.
+func TestExecute_WaitsForTranscriptBeforeReadingAnswer(t *testing.T) {
+	f, c := newFake(t)
+	f.activePolls = 2
+	f.turns = []scriptedTurn{{
+		stream: sse(`{"type":"start","messageId":"a1"}`,
+			`{"type":"text-delta","id":"t","delta":"57 spans; root server.StreamWeave (0000000000000001)."}`,
+			`{"type":"finish"}`),
+		assistant: assistantMsg("a1", map[string]any{"type": "text", "text": "57 spans; root server.StreamWeave (0000000000000001)."}),
+	}}
+	tool, err := New(c, Config{Project: testProject, Model: testModel})
+	require.NoError(t, err)
+	tool.idlePoll = time.Millisecond
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"question": "q", "trace_id": testTrace})
+	require.NoError(t, err)
+	require.True(t, res.Success)
+	ans := res.Data.(*Answer)
+	assert.Equal(t, "57 spans; root server.StreamWeave (0000000000000001).", ans.Answer)
+	assert.True(t, ans.Usage.Reported, "usage comes from the saved assistant message")
+	assert.NotContains(t, strings.Join(ans.Warnings, "|"), "no text")
+}
+
+// TestExecute_StreamTextWhenTranscriptHasNoAnswer pins the fallback: if the
+// saved transcript has no assistant text but the stream carried some, the
+// streamed text is the answer, with a warning.
+func TestExecute_StreamTextWhenTranscriptHasNoAnswer(t *testing.T) {
+	f, c := newFake(t)
+	f.turns = []scriptedTurn{{
+		stream: sse(`{"type":"start","messageId":"a1"}`,
+			`{"type":"text-delta","id":"t","delta":"Answer from the stream."}`,
+			`{"type":"finish"}`),
+	}}
+	tool, err := New(c, Config{Project: testProject, Model: testModel})
+	require.NoError(t, err)
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"question": "q", "trace_id": testTrace})
+	require.NoError(t, err)
+	require.True(t, res.Success)
+	ans := res.Data.(*Answer)
+	assert.Equal(t, "Answer from the stream.", ans.Answer)
+	assert.Contains(t, strings.Join(ans.Warnings, "|"), "answer taken from the stream")
 }

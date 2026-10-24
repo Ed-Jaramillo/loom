@@ -52,6 +52,10 @@ const (
 	DefaultPayloadBytes = 2 << 10
 	// busyRetryPoll is how often a busy session is re-checked.
 	busyRetryPoll = time.Second
+	// transcriptIdlePoll and transcriptSettleTimeout bound the wait for
+	// Phoenix to finish saving a turn after its stream ends.
+	transcriptIdlePoll      = 250 * time.Millisecond
+	transcriptSettleTimeout = 15 * time.Second
 )
 
 // Config configures the tool.
@@ -109,6 +113,8 @@ type Tool struct {
 	client *phoenix.Client
 	cfg    Config
 	now    func() time.Time
+	// idlePoll is how often awaitSavedTranscript re-checks the session.
+	idlePoll time.Duration
 
 	mu       sync.Mutex
 	projects map[string]string // identifier -> GlobalID
@@ -131,6 +137,7 @@ func New(client *phoenix.Client, cfg Config) (*Tool, error) {
 		client:   client,
 		cfg:      cfg.withDefaults(),
 		now:      time.Now,
+		idlePoll: transcriptIdlePoll,
 		projects: map[string]string{},
 	}, nil
 }
@@ -543,25 +550,18 @@ type pendingCall struct {
 // returns its approval-requested tool calls plus that message's id. When the
 // transcript cannot be read it falls back to the stream and returns a warning.
 func (t *Tool) pendingApprovals(ctx context.Context, sessionID string, turn *phoenix.ChatTurn) ([]pendingCall, string, string) {
+	if warn := t.awaitSavedTranscript(ctx, sessionID); warn != "" {
+		return t.streamApprovals(turn, warn)
+	}
 	msgs, truncated, err := t.client.ListAgentSessionMessages(ctx, sessionID)
 	if err != nil || truncated {
-		var out []pendingCall
-		if turn != nil {
-			for _, tc := range turn.PendingApprovals() {
-				out = append(out, pendingCall{ToolCallID: tc.ToolCallID, ToolName: tc.ToolName})
-			}
-		}
-		lastID := ""
-		if turn != nil {
-			lastID = turn.MessageID
-		}
 		warn := "transcript unavailable; approvals taken from the stream"
 		if err != nil {
 			warn += ": " + err.Error()
 		} else {
 			warn += " (transcript truncated at page cap)"
 		}
-		return out, lastID, warn
+		return t.streamApprovals(turn, warn)
 	}
 	if len(msgs) == 0 {
 		return nil, "", ""
@@ -578,6 +578,32 @@ func (t *Tool) pendingApprovals(ctx context.Context, sessionID string, turn *pho
 		}
 	}
 	return out, last.ID, ""
+}
+
+// streamApprovals is pendingApprovals' fallback when the transcript cannot be
+// trusted: the approval requests and message id the stream announced.
+func (t *Tool) streamApprovals(turn *phoenix.ChatTurn, warn string) ([]pendingCall, string, string) {
+	if turn == nil {
+		return nil, "", warn
+	}
+	var out []pendingCall
+	for _, tc := range turn.PendingApprovals() {
+		out = append(out, pendingCall{ToolCallID: tc.ToolCallID, ToolName: tc.ToolName})
+	}
+	return out, turn.MessageID, warn
+}
+
+// awaitSavedTranscript waits until Phoenix releases the session's turn lock.
+// Phoenix saves a turn's messages before it releases the lock, so reading the
+// transcript as soon as the stream ends can miss the assistant message. It
+// returns a warning when the session did not go idle in time.
+func (t *Tool) awaitSavedTranscript(ctx context.Context, sessionID string) string {
+	ctx, cancel := context.WithTimeout(ctx, transcriptSettleTimeout)
+	defer cancel()
+	if err := t.client.WaitUntilIdle(ctx, sessionID, t.idlePoll); err != nil {
+		return "session did not go idle after the stream ended; transcript may be incomplete: " + err.Error()
+	}
+	return ""
 }
 
 // approved reports whether a PXI tool is on the read-only allowlist.
@@ -617,6 +643,9 @@ func (t *Tool) finish(ctx context.Context, sessionID string, turns []*phoenix.Ch
 	}
 	answer.StreamChunkTypes = sortedKeys(chunkTypes)
 
+	if warn := t.awaitSavedTranscript(ctx, sessionID); warn != "" {
+		answer.Warnings = append(answer.Warnings, warn)
+	}
 	msgs, truncated, err := t.client.ListAgentSessionMessages(ctx, sessionID)
 	if err != nil {
 		answer.Warnings = append(answer.Warnings, "final transcript unavailable, answer taken from the stream: "+err.Error())
@@ -677,21 +706,36 @@ func (t *Tool) finish(ctx context.Context, sessionID string, turns []*phoenix.Ch
 	}
 	answer.Answer, answer.AnswerTruncated = clip(text.String(), t.cfg.MaxAnswerBytes)
 	if answer.Answer == "" {
-		answer.Warnings = append(answer.Warnings, "assistant returned no text")
+		if streamed := streamText(turns); streamed != "" {
+			answer.Answer, answer.AnswerTruncated = clip(streamed, t.cfg.MaxAnswerBytes)
+			answer.Warnings = append(answer.Warnings, "transcript had no assistant text; answer taken from the stream")
+		} else {
+			answer.Warnings = append(answer.Warnings, "assistant returned no text")
+		}
 	}
+}
+
+// streamText joins the assistant text the turns' streams carried.
+func streamText(turns []*phoenix.ChatTurn) string {
+	var text strings.Builder
+	for _, turn := range turns {
+		if turn == nil || turn.Text == "" {
+			continue
+		}
+		if text.Len() > 0 {
+			text.WriteString("\n")
+		}
+		text.WriteString(turn.Text)
+	}
+	return text.String()
 }
 
 // finishFromStreams is the fallback when the transcript is unreadable.
 func (t *Tool) finishFromStreams(turns []*phoenix.ChatTurn, decisions map[string]string, answer *Answer) {
-	var text strings.Builder
 	for _, turn := range turns {
 		if turn == nil {
 			continue
 		}
-		if text.Len() > 0 && turn.Text != "" {
-			text.WriteString("\n")
-		}
-		text.WriteString(turn.Text)
 		for _, tc := range turn.ToolCalls {
 			answer.ToolCalls = append(answer.ToolCalls, ToolCallSummary{
 				ToolCallID:       tc.ToolCallID,
@@ -704,7 +748,7 @@ func (t *Tool) finishFromStreams(turns []*phoenix.ChatTurn, decisions map[string
 			})
 		}
 	}
-	answer.Answer, answer.AnswerTruncated = clip(text.String(), t.cfg.MaxAnswerBytes)
+	answer.Answer, answer.AnswerTruncated = clip(streamText(turns), t.cfg.MaxAnswerBytes)
 }
 
 func capRaw(raw json.RawMessage, max int) (json.RawMessage, bool) {
