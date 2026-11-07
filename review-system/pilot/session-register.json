@@ -1,0 +1,66 @@
+{
+  "rows": [
+    {
+      "row_id": "W1.1.1",
+      "repo": "R",
+      "branch": "claude/focused-fermat-7n0f7a",
+      "worktree": "/home/user/loom",
+      "app_session_id": "session_01CB4LpvRHmaazLPi2jTiC9t",
+      "status": "active",
+      "depends_on": ["G0"],
+      "evidence": "review-system/pilot/profile_test.go, register_test.go"
+    },
+    {
+      "row_id": "W1.1.2",
+      "repo": "R",
+      "branch": "claude/focused-fermat-7n0f7a",
+      "worktree": "/home/user/loom",
+      "app_session_id": "session_01CB4LpvRHmaazLPi2jTiC9t",
+      "status": "active",
+      "depends_on": ["W1.1.1"],
+      "evidence": "review-system/bundle/bundle_test.go"
+    },
+    {
+      "row_id": "W1.1.3",
+      "repo": "R",
+      "branch": "claude/focused-fermat-7n0f7a",
+      "status": "blocked",
+      "depends_on": ["W1.1.2", "G-RUN"],
+      "blocker": "G-RUN not recorded: no verified Loom execution path has been shown to accept the frozen input"
+    },
+    {
+      "row_id": "W1.1.4",
+      "repo": "R",
+      "branch": "claude/focused-fermat-7n0f7a",
+      "status": "blocked",
+      "depends_on": ["W1.1.2", "G-RUN"],
+      "blocker": "G-RUN not recorded: no verified Loom execution path has been shown to accept the frozen input"
+    },
+    {
+      "row_id": "W1.1.5",
+      "repo": "R",
+      "branch": "claude/focused-fermat-7n0f7a",
+      "status": "blocked",
+      "depends_on": ["W1.1.3", "W1.1.4"],
+      "blocker": "waits for W1.1.3 and W1.1.4"
+    },
+    {
+      "row_id": "W1.1.6",
+      "repo": "R",
+      "branch": "claude/focused-fermat-7n0f7a",
+      "worktree": "/home/user/loom",
+      "app_session_id": "session_01CB4LpvRHmaazLPi2jTiC9t",
+      "status": "active",
+      "depends_on": ["W1.1.1"],
+      "evidence": "review-system/card/card_test.go"
+    },
+    {
+      "row_id": "W1.1.7",
+      "repo": "R",
+      "branch": "claude/focused-fermat-7n0f7a",
+      "status": "blocked",
+      "depends_on": ["W1.1.5"],
+      "blocker": "waits for W1.1.5"
+    }
+  ]
+}
